@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#000000">
+<title>Pulse</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:#000; color:#fff; overflow:hidden;
+    font-family: -apple-system, system-ui, "Helvetica Neue", sans-serif; touch-action:none; user-select:none; -webkit-user-select:none; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  #start { position:fixed; inset:0; display:flex; flex-direction:column; justify-content:flex-end;
+    padding: 0 28px calc(56px + env(safe-area-inset-bottom)); background:#000; }
+  #start h1 { font-size: 88px; line-height:.9; font-weight:800; letter-spacing:-.04em; margin:0 0 20px; }
+  #start p { font-size:17px; line-height:1.4; margin:0 0 28px; max-width:34ch; color:#cfcfcf; }
+  #start .fine { font-size:13px; color:#7a7a7a; margin:16px 0 0; }
+  button.big { font: inherit; font-size:19px; font-weight:600; background:#fff; color:#000; border:0;
+    border-radius:999px; padding:18px 0; width:100%; }
+  button.big:active { transform:scale(.98); }
+
+  #err { position:fixed; inset:0; background:#000; padding:28px; display:flex; align-items:center; font-size:17px; line-height:1.45; }
+
+  #hud { position:fixed; left:0; right:0; bottom:0; padding:14px 16px calc(14px + env(safe-area-inset-bottom));
+    background:rgba(0,0,0,.72); backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    display:flex; flex-direction:column; gap:12px; transition:transform .25s ease; }
+  #hud.hidden { transform:translateY(110%); }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row span { font-size:13px; color:#9a9a9a; width:64px; flex:none; }
+  .seg { display:flex; gap:6px; flex:1; }
+  .seg button { flex:1; font:inherit; font-size:14px; padding:9px 0; border-radius:10px; border:1px solid #333; background:#111; color:#ddd; }
+  .seg button.on { background:#fff; color:#000; border-color:#fff; }
+  input[type=range] { flex:1; accent-color:#fff; }
+  #debug { position:fixed; top:calc(10px + env(safe-area-inset-top)); left:10px; font: 12px/1.5 ui-monospace, Menlo, monospace;
+    color:#8f8; background:rgba(0,0,0,.6); padding:8px 10px; border-radius:8px; white-space:pre; pointer-events:none; }
+  [hidden] { display:none !important; }
+  @media (prefers-reduced-motion: reduce) { #hud { transition:none; } }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="start">
+  <h1>Pulse</h1>
+  <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
+  <button class="big" id="go">Start</button>
+  <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
+</div>
+
+<div id="err" hidden></div>
+
+<div id="hud" class="hidden" hidden>
+  <div class="row"><span>Look</span><div class="seg" id="scenes"></div></div>
+  <div class="row"><span>Color</span><div class="seg" id="palettes"></div></div>
+  <div class="row"><span>Bright</span><input type="range" id="bright" min="0.15" max="1" step="0.01" value="0.8"></div>
+  <div class="row"><span>Feel</span><input type="range" id="sens" min="0.5" max="2" step="0.05" value="1"></div>
+  <div class="row"><span></span><div class="seg"><button id="dbg">Show levels</button></div></div>
+</div>
+<div id="debug" hidden></div>
+
+<script>
+/* ============================================================
+   Pulse — layer 1
+   Architecture (kept deliberately modular so later layers slot in):
+     Signal  : the single normalized state object every scene reads from
+     Audio   : mic -> FFT -> bass/mid/high + beat detector + auto-gain
+     Motion  : accelerometer/gyro -> tilt, energy, shake
+     Gesture : (layer 2 stub) camera hand/face -> Signal.gesture
+     Bridge  : (layer 3 stub) sends a compact Signal frame to a relay server
+     Scenes  : pure functions of (ctx, Signal, dt) — add new looks here
+     UI      : start flow, permissions, controls, wake lock
+   ============================================================ */
+
+const Signal = {
+  audio:  { level:0, bass:0, mid:0, high:0, beat:false, beatAge:9, bpm:0, beats:0 },
+  motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false },
+  gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
+  user:   { bright:0.8, sens:1, palette:0, scene:0 },
+  t:0
+};
+
+/* ---------------- Audio ---------------- */
+const Audio = {
+  ctx:null, analyser:null, data:null, bins:null,
+  hist:new Float32Array(90), hi:0, peak:0.25, lastBeat:0, intervals:[],
+  async start() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }, video:false });
+    const AC = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AC();
+    await this.ctx.resume();
+    const src = this.ctx.createMediaStreamSource(stream);
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 2048;
+    this.analyser.smoothingTimeConstant = 0.35;
+    src.connect(this.analyser);
+    this.data = new Uint8Array(this.analyser.frequencyBinCount);
+    const hz = this.ctx.sampleRate / this.analyser.fftSize;
+    const b = f => Math.max(1, Math.round(f / hz));
+    this.bins = { bass:[b(40), b(150)], mid:[b(150), b(2000)], high:[b(2000), b(8000)] };
+  },
+  band(lo, hi) { let s=0; for (let i=lo;i<hi;i++) s+=this.data[i]; return s/((hi-lo)*255); },
+  update(now) {
+    if (!this.analyser) return;
+    this.analyser.getByteFrequencyData(this.data);
+    const a = Signal.audio, B = this.bins;
+    const rawBass = this.band(...B.bass);
+    a.mid  = this.band(...B.mid);
+    a.high = this.band(...B.high);
+    a.level = (rawBass + a.mid + a.high) / 3;
+
+    // auto-gain: normalize bass against a slowly decaying peak, with a floor so silence stays dark
+    this.peak = Math.max(rawBass, this.peak * 0.9985, 0.25);
+    a.bass = Math.min(1, rawBass / this.peak);
+
+    // beat: bass energy vs rolling mean/std over ~1.5 s
+    const h = this.hist; h[this.hi] = rawBass; this.hi = (this.hi + 1) % h.length;
+    let m=0; for (const v of h) m+=v; m/=h.length;
+    let v=0; for (const x of h) v+=(x-m)*(x-m); const sd = Math.sqrt(v/h.length);
+    const k = 1.6 / Signal.user.sens;
+    a.beat = false;
+    if (rawBass > 0.12 && rawBass > m*1.25 && rawBass > m + k*sd && now - this.lastBeat > 230) {
+      a.beat = true; a.beats++;
+      if (this.lastBeat) { this.intervals.push(now - this.lastBeat); if (this.intervals.length > 8) this.intervals.shift();
+        const s=[...this.intervals].sort((x,y)=>x-y); a.bpm = Math.round(60000 / s[s.length>>1]); }
+      this.lastBeat = now;
+    }
+    a.beatAge = (now - this.lastBeat) / 1000;
+  }
+};
+
+/* ---------------- Motion ---------------- */
+const Motion = {
+  eNorm:0,
+  async start() {
+    if (typeof DeviceMotionEvent === 'undefined') return;
+    if (typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { if (await DeviceMotionEvent.requestPermission() !== 'granted') return; } catch { return; }
+    }
+    window.addEventListener('devicemotion', e => this.onMotion(e));
+    Signal.motion.available = true;
+  },
+  onMotion(e) {
+    const m = Signal.motion, g = e.accelerationIncludingGravity, a = e.acceleration, r = e.rotationRate;
+    if (g) { m.tiltX += ((g.x||0)/9.81 - m.tiltX)*0.15; m.tiltY += ((g.y||0)/9.81 - m.tiltY)*0.15; }
+    if (a) { const mag = Math.hypot(a.x||0, a.y||0, a.z||0) / 9.81;   // in g
+      const n = Math.min(1, mag / 1.5);
+      m.energy += (n - m.energy) * (n > m.energy ? 0.5 : 0.06);
+      m.shake = n > 0.55 * (1/Signal.user.sens); }
+    if (r) { const s = Math.hypot(r.alpha||0, r.beta||0, r.gamma||0) / 360; m.spin += (Math.min(1,s) - m.spin)*0.2; }
+  }
+};
+
+/* ---------------- Gesture (layer 2 stub) ---------------- */
+// Later: load MediaPipe Hands/FaceMesh, run on the front camera at low fps,
+// write Signal.gesture.hands / .open and set .available = true. Scenes already read it.
+const Gesture = { start(){}, update(){} };
+
+/* ---------------- Bridge (layer 3 stub) ---------------- */
+// Add ?relay=wss://your-relay.example to the URL and this will stream a compact frame
+// ~5x/sec. Server aggregates across phones -> MIDI/DAW. No-op when no relay is set.
+const Bridge = {
+  url: new URLSearchParams(location.search).get('relay'), ws:null, last:0,
+  start() { if (!this.url) return; try { this.ws = new WebSocket(this.url); } catch {} },
+  update(now) {
+    if (!this.ws || this.ws.readyState !== 1 || now - this.last < 200) return;
+    this.last = now; const a = Signal.audio, m = Signal.motion;
+    this.ws.send(JSON.stringify({ t:Math.round(now), bass:+a.bass.toFixed(3), beat:a.beats,
+      energy:+m.energy.toFixed(3), tx:+m.tiltX.toFixed(2), ty:+m.tiltY.toFixed(2), shake:m.shake?1:0 }));
+  }
+};
+
+/* ---------------- Palettes & Scenes ---------------- */
+const Palettes = [
+  { name:'Neon',  hues:[300, 190, 60]  },
+  { name:'Fire',  hues:[0, 28, 50]     },
+  { name:'Ice',   hues:[200, 225, 265] },
+  { name:'Roam',  hues:null            }   // slow full-spectrum drift
+];
+let drift = 0;
+function hue(i=0) {
+  const p = Palettes[Signal.user.palette];
+  const tiltShift = Signal.motion.tiltX * 40;
+  if (!p.hues) return (drift*20 + i*40 + tiltShift) % 360;
+  return (p.hues[i % p.hues.length] + tiltShift + 360) % 360;
+}
+const hsl = (h,s,l,a=1) => `hsla(${h},${s}%,${l}%,${a})`;
+
+const rings = [], sparks = [];
+const Scenes = [
+  { name:'Bloom', draw(ctx, W, H, dt) {
+      const a = Signal.audio, m = Signal.motion;
+      ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.fillRect(0,0,W,H);
+      const cx = W/2 + m.tiltX * W*0.25, cy = H/2 - m.tiltY * H*0.25;
+      const R = Math.min(W,H) * (0.12 + 0.42*a.bass + 0.15*m.energy);
+      const g = ctx.createRadialGradient(cx,cy,0,cx,cy,R);
+      g.addColorStop(0, hsl(hue(0), 100, 70, 0.95));
+      g.addColorStop(0.5, hsl(hue(1), 100, 50, 0.55));
+      g.addColorStop(1, hsl(hue(2), 100, 40, 0));
+      ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+      if (a.beat) rings.push({ r:R*0.6, a:1, h:hue(a.beats) });
+      ctx.lineWidth = 6;
+      for (let i=rings.length-1;i>=0;i--) { const k=rings[i]; k.r += (W*1.2)*dt; k.a -= 1.6*dt;
+        if (k.a<=0) { rings.splice(i,1); continue; }
+        ctx.strokeStyle = hsl(k.h,100,65,k.a); ctx.beginPath(); ctx.arc(cx,cy,k.r,0,Math.PI*2); ctx.stroke(); }
+      if (m.shake || (Signal.gesture.available && Signal.gesture.open > 0.7)) for (let i=0;i<6;i++) {
+        const t=Math.random()*Math.PI*2, s=(200+600*Math.random());
+        sparks.push({ x:cx, y:cy, vx:Math.cos(t)*s, vy:Math.sin(t)*s, a:1, h:hue(i) }); }
+      for (let i=sparks.length-1;i>=0;i--) { const s=sparks[i]; s.x+=s.vx*dt; s.y+=s.vy*dt; s.a-=1.2*dt;
+        if (s.a<=0) { sparks.splice(i,1); continue; }
+        ctx.fillStyle = hsl(s.h,100,70,s.a); ctx.beginPath(); ctx.arc(s.x,s.y,4,0,Math.PI*2); ctx.fill(); }
+    } },
+  { name:'Strobe', draw(ctx, W, H, dt) {
+      const a = Signal.audio, m = Signal.motion;
+      const flash = Math.max(0, 1 - a.beatAge*6);           // sharp hit, fast decay
+      const base = 0.06 + 0.25*a.bass + 0.2*m.energy;
+      ctx.fillStyle = hsl(hue(a.beats), 100, 8 + 40*base + 50*flash);
+      ctx.fillRect(0,0,W,H);
+      if (flash > 0) { ctx.fillStyle = `rgba(255,255,255,${flash*0.9})`; ctx.fillRect(0,0,W,H); }
+    } },
+  { name:'Bars', draw(ctx, W, H, dt) {
+      const a = Signal.audio, m = Signal.motion, n = 24;
+      ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0,0,W,H);
+      Audio.analyser && Audio.analyser.getByteFrequencyData(Audio.data);
+      const step = Math.floor(Audio.bins ? Audio.bins.high[1] / n : 4);
+      const w = W / n, skew = m.tiltX * 0.6;
+      for (let i=0;i<n;i++) { let s=0; for (let j=0;j<step;j++) s += Audio.data ? Audio.data[i*step+j] : 0;
+        const v = Math.min(1, (s/(step*255)) * 1.6 * Signal.user.sens);
+        const h = H * v * (0.5 + 0.5*a.bass + 0.3*m.energy);
+        ctx.fillStyle = hsl(hue(i)+i*3, 100, 55, 0.9);
+        ctx.fillRect(i*w + 1, H - h, w - 2 + skew*i, h); }
+      if (a.beat) { ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(0,0,W,H); }
+    } }
+];
+
+/* ---------------- Render loop ---------------- */
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+let W=0, H=0, last=0, fps=0;
+function resize() {
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W*dpr; canvas.height = H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
+}
+addEventListener('resize', resize);
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last)/1000 || 0.016); last = now; Signal.t = now;
+  fps += (1/dt - fps)*0.05; drift += dt;
+  Audio.update(now); Gesture.update(now);
+  Scenes[Signal.user.scene].draw(ctx, W, H, dt);
+  Bridge.update(now);
+  if (!debugEl.hidden) debugEl.textContent =
+    `bass ${Signal.audio.bass.toFixed(2)}  lvl ${Signal.audio.level.toFixed(2)}\n` +
+    `beats ${Signal.audio.beats}  bpm ${Signal.audio.bpm}\n` +
+    `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
+    `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}\n` +
+    `fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}`;
+  requestAnimationFrame(frame);
+}
+
+/* ---------------- UI ---------------- */
+const startEl = document.getElementById('start'), errEl = document.getElementById('err'),
+      hud = document.getElementById('hud'), debugEl = document.getElementById('debug');
+let wake = null, hudTimer = null;
+
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) wake = await navigator.wakeLock.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') { keepAwake(); Audio.ctx && Audio.ctx.resume(); }
+});
+
+function showHud(on) {
+  hud.classList.toggle('hidden', !on); clearTimeout(hudTimer);
+  if (on) hudTimer = setTimeout(() => hud.classList.add('hidden'), 5000);
+}
+canvas.addEventListener('pointerdown', () => showHud(hud.classList.contains('hidden')));
+hud.addEventListener('pointerdown', () => showHud(true));
+
+function seg(id, items, key) {
+  const box = document.getElementById(id);
+  items.forEach((it, i) => { const b = document.createElement('button'); b.textContent = it.name;
+    if (i === Signal.user[key]) b.classList.add('on');
+    b.onclick = () => { Signal.user[key] = i; [...box.children].forEach(c => c.classList.remove('on')); b.classList.add('on'); };
+    box.appendChild(b); });
+}
+seg('scenes', Scenes, 'scene'); seg('palettes', Palettes, 'palette');
+document.getElementById('bright').oninput = e => { Signal.user.bright = +e.target.value; canvas.style.opacity = Signal.user.bright; };
+document.getElementById('sens').oninput = e => Signal.user.sens = +e.target.value;
+document.getElementById('dbg').onclick = e => { debugEl.hidden = !debugEl.hidden; e.target.textContent = debugEl.hidden ? 'Show levels' : 'Hide levels'; };
+
+document.getElementById('go').onclick = async () => {
+  const go = document.getElementById('go'); go.disabled = true; go.textContent = 'Starting…';
+  try {
+    await Motion.start();          // must happen inside the tap on iOS
+    await Audio.start();           // also needs the tap for AudioContext
+  } catch (e) {
+    startEl.hidden = true; errEl.hidden = false;
+    errEl.textContent = (e && e.name === 'NotAllowedError')
+      ? 'Microphone access was blocked. Reload the page and tap Allow when asked for the microphone.'
+      : 'Could not start the microphone (' + (e && e.message || e) + '). Make sure the page is opened over https and try again.';
+    return;
+  }
+  Gesture.start(); Bridge.start();
+  startEl.hidden = true; hud.hidden = false;
+  resize(); canvas.style.opacity = Signal.user.bright; keepAwake();
+  if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(()=>{});
+  requestAnimationFrame(frame); showHud(true);
+};
+resize();
+</script>
+</body>
+</html>
