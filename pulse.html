@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.56</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.57</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -60,6 +60,7 @@
   <div class="row"><span>Look</span><div class="seg" id="scenes"></div></div>
   <div class="row"><span>Color</span><div class="seg" id="palettes"></div></div>
   <div class="row"><span>Physics</span><div class="seg" id="physics"></div></div>
+  <div class="row"><span>Test</span><div class="seg"><button id="tHits">Hits on</button><button id="tSparks">Sparks on</button><button id="tSwirl">Swirl on</button></div></div>
   <div class="row"><span>Bright</span><input type="range" id="bright" min="0.15" max="1" step="0.01" value="0.8"></div>
   <div class="row"><span>Feel</span><input type="range" id="sens" min="0.5" max="2" step="0.05" value="1"></div>
   <div class="row"><span></span><div class="seg"><button id="dbg">Show levels</button></div></div>
@@ -84,7 +85,7 @@ const Signal = {
             onset:0, centroid:0.5, chroma:new Float32Array(12), key:0, key2:0, keyStrength:0 },
   motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1, rz:0, events:0 },
   gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
-  user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1 },
+  user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1, noHits:false, noSparks:false, noSwirl:false },
   t:0
 };
 
@@ -348,7 +349,7 @@ const Fluid = {
     // ---- music -> gas
     const fifths = k => ((k*7)%12)*30, warm=(0.5-a.centroid)*50;
     const cx = 0.5 + m.tiltX*0.06, cy = 0.5 - m.tiltY*0.06;
-    if (a.beat) {
+    if (a.beat && !Signal.user.noHits) {
       const blast = a.onset > 0.55;
       let h = (fifths(a.key) + warm + 360)%360;
       if (blast) h = (fifths(a.key2) + warm + 150 + 360)%360;         // new color so the blast stands out
@@ -367,7 +368,7 @@ const Fluid = {
       const [r,g,b] = hsl2rgb((this.lastHue + 20)%360, 0.7, 0.45); const amt = 0.03*a.bass;
       this.splat(cx,cy, r*amt,g*amt,b*amt, 0.0015, 0);
     }
-    if (a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
+    if (!Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
       const [r,g,b] = hsl2rgb((this.lastHue+180)%360, 0.5, 0.75);
       this.splat(0.2+Math.random()*0.6, 0.2+Math.random()*0.6, r*0.35,g*0.35,b*0.35, 0.0003, 60);
     }
@@ -379,7 +380,7 @@ const Fluid = {
     // ---- solve
     u=this.use('curl',this.crl); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('vort',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uCurl,this.crl.bind(1));
-    gl.uniform1f(u.curl, 25 + 20*a.high); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
+    gl.uniform1f(u.curl, Signal.user.noSwirl ? 0 : 25 + 20*a.high); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
     u=this.use('div',this.div); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('clear',this.prs.w); gl.uniform1i(u.uTexture,this.prs.r.bind(0)); gl.uniform1f(u.value,0.8); this.draw(); this.prs.swap();
     for (let i=0;i<14;i++) { u=this.use('press',this.prs.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uDivergence,this.div.bind(0)); gl.uniform1i(u.uPressure,this.prs.r.bind(1)); this.draw(); this.prs.swap(); }
@@ -388,9 +389,33 @@ const Fluid = {
     gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation,0.35); gl.uniform1f(u.cap,0); this.draw(); this.vel.swap();
     u=this.use('advect',this.dye.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uSource,this.dye.r.bind(1));
     gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.13 + bpm/1200); gl.uniform1f(u.cap,1.6); this.draw(); this.dye.swap();
+    if (!debugEl.hidden) this.measure();
     // ---- show
     u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1f(u.bright,1.0); this.draw();
   }
+};
+Fluid.measure = function() {
+  const gl=this.gl, t=this.vel.r.t;
+  try {
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    const levels = Math.floor(Math.log2(Math.max(this.vel.r.w, this.vel.r.h)));
+    if (!this.mfb) this.mfb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.mfb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, levels);
+    const type = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE);
+    let vx, vy;
+    if (type === gl.FLOAT) { const px = new Float32Array(4); gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px); vx=px[0]; vy=px[1]; }
+    else { const px = new Uint16Array(4); gl.readPixels(0,0,1,1,gl.RGBA,gl.HALF_FLOAT,px);
+      const h2f = h => { const s=(h>>15)&1, e=(h>>10)&31, m=h&1023; if(e===0) return (s?-1:1)*Math.pow(2,-14)*(m/1024); if(e===31) return m?NaN:(s?-Infinity:Infinity); return (s?-1:1)*Math.pow(2,e-15)*(1+m/1024); };
+      vx=h2f(px[0]); vy=h2f(px[1]); }
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    this.meanV = [vx, vy];
+    if (!this.peakV || Math.hypot(vx,vy) > Math.hypot(...this.peakV)) this.peakV = [vx, vy];
+    if (isNaN(vx) || isNaN(vy)) this.nanCount = (this.nanCount||0)+1;
+  } catch (e) { this.meanV = null; this.measureErr = String(e).slice(0,40); }
 };
 function hsl2rgb(h,s,l){ h/=360; const f=(n)=>{ const k=(n+h*12)%12, a=s*Math.min(l,1-l); return l-a*Math.max(-1,Math.min(k-3,9-k,1)); }; return [f(0),f(8),f(4)]; }
 
@@ -527,7 +552,8 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.56  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.57  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  onset ${Signal.audio.onset.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
     `mic ${Audio.settings ? ('ns='+Audio.settings.noiseSuppression+' agc='+Audio.settings.autoGainControl+' ec='+Audio.settings.echoCancellation) : '?'}`;
@@ -563,6 +589,8 @@ function seg(id, items, key) {
 seg('scenes', Scenes, 'scene'); seg('palettes', Palettes, 'palette'); seg('physics', [{name:'Off'},{name:'Calm'},{name:'Full'}], 'physics');
 document.getElementById('bright').oninput = e => { Signal.user.bright = +e.target.value; canvas.style.opacity = Signal.user.bright; document.getElementById('f').style.opacity = Signal.user.bright; };
 document.getElementById('sens').oninput = e => Signal.user.sens = +e.target.value;
+[['tHits','noHits','Hits'],['tSparks','noSparks','Sparks'],['tSwirl','noSwirl','Swirl']].forEach(([id,key,lab]) => {
+  document.getElementById(id).onclick = e => { Signal.user[key] = !Signal.user[key]; e.target.textContent = lab + (Signal.user[key] ? ' OFF' : ' on'); e.target.classList.toggle('on', Signal.user[key]); }; });
 document.getElementById('dbg').onclick = e => { debugEl.hidden = !debugEl.hidden; e.target.textContent = debugEl.hidden ? 'Show levels' : 'Hide levels'; };
 
 document.getElementById('go').onclick = async () => {
