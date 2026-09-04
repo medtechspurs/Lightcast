@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.50</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.51</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -59,6 +59,7 @@
 <div id="hud" class="hidden" hidden>
   <div class="row"><span>Look</span><div class="seg" id="scenes"></div></div>
   <div class="row"><span>Color</span><div class="seg" id="palettes"></div></div>
+  <div class="row"><span>Physics</span><div class="seg" id="physics"></div></div>
   <div class="row"><span>Bright</span><input type="range" id="bright" min="0.15" max="1" step="0.01" value="0.8"></div>
   <div class="row"><span>Feel</span><input type="range" id="sens" min="0.5" max="2" step="0.05" value="1"></div>
   <div class="row"><span></span><div class="seg"><button id="dbg">Show levels</button></div></div>
@@ -81,9 +82,9 @@
 const Signal = {
   audio:  { level:0, bass:0, mid:0, high:0, beat:false, beatAge:9, bpm:0, beats:0,
             onset:0, centroid:0.5, chroma:new Float32Array(12), key:0, key2:0, keyStrength:0 },
-  motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:-1 },
+  motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1 },
   gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
-  user:   { bright:0.8, sens:1, palette:0, scene:0 },
+  user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1 },
   t:0
 };
 
@@ -195,8 +196,12 @@ const Audio = {
 };
 
 /* ---------------- Motion ---------------- */
+// iOS reports acceleration and gravity with the sign flipped relative to the spec/Android.
+// Internally we use the spec convention: phone upright -> gy = +1 (points 'up'); moving right -> ax > 0.
+const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const SGN = IOS ? -1 : 1;
 const Motion = {
-  eNorm:0,
+  eNorm:0, bx:0, by:0,
   async start() {
     if (typeof DeviceMotionEvent === 'undefined') return;
     if (typeof DeviceMotionEvent.requestPermission === 'function') {
@@ -208,8 +213,11 @@ const Motion = {
   onMotion(e) {
     const m = Signal.motion, g = e.accelerationIncludingGravity, a = e.acceleration, r = e.rotationRate;
     if (g) { m.tiltX += ((g.x||0)/9.81 - m.tiltX)*0.15; m.tiltY += ((g.y||0)/9.81 - m.tiltY)*0.15; }
-    if (g) { m.gx += ((g.x||0)/9.81 - m.gx)*0.2; m.gy += ((g.y||0)/9.81 - m.gy)*0.2; }
-    if (a) { m.ax += ((a.x||0)/9.81 - m.ax)*0.5; m.ay += ((a.y||0)/9.81 - m.ay)*0.5;
+    if (g) { m.gx += (SGN*(g.x||0)/9.81 - m.gx)*0.2; m.gy += (SGN*(g.y||0)/9.81 - m.gy)*0.2; }
+    if (a) { const rx = SGN*(a.x||0)/9.81, ry = SGN*(a.y||0)/9.81;
+      this.bx += (rx - this.bx)*0.01; this.by += (ry - this.by)*0.01;          // slow bias estimate
+      const dz = v => Math.abs(v) < 0.03 ? 0 : v - Math.sign(v)*0.03;          // dead zone
+      m.ax += (dz(rx - this.bx) - m.ax)*0.5; m.ay += (dz(ry - this.by) - m.ay)*0.5;
       const mag = Math.hypot(a.x||0, a.y||0, a.z||0) / 9.81;   // in g
       const n = Math.min(1, mag / 1.5);
       m.energy += (n - m.energy) * (n > m.energy ? 0.5 : 0.06);
@@ -345,7 +353,7 @@ const Fluid = {
       this.lastHue = h;
     }
     if (a.bass > 0.05) {                                              // continuous heat between hits
-      const [r,g,b] = hsl2rgb((this.lastHue + 20)%360, 0.7, 0.45); const amt = 0.12*a.bass;
+      const [r,g,b] = hsl2rgb((this.lastHue + 20)%360, 0.7, 0.45); const amt = 0.05*a.bass;
       this.splat(cx,cy, r*amt,g*amt,b*amt, 0.0015, 0);
     }
     if (a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
@@ -354,7 +362,8 @@ const Fluid = {
     }
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
-    gl.uniform2f(u.force, -m.ax*500, -m.ay*500); gl.uniform2f(u.buoy, -m.gx*45, -m.gy*45); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
+    const ph = [0, 0.5, 1][Signal.user.physics];
+    gl.uniform2f(u.force, -m.ax*500*ph, -m.ay*500*ph); gl.uniform2f(u.buoy, m.gx*30*ph, m.gy*30*ph); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
     // ---- solve
     u=this.use('curl',this.crl); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('vort',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uCurl,this.crl.bind(1));
@@ -364,9 +373,9 @@ const Fluid = {
     for (let i=0;i<14;i++) { u=this.use('press',this.prs.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uDivergence,this.div.bind(0)); gl.uniform1i(u.uPressure,this.prs.r.bind(1)); this.draw(); this.prs.swap(); }
     u=this.use('grad',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uPressure,this.prs.r.bind(0)); gl.uniform1i(u.uVelocity,this.vel.r.bind(1)); this.draw(); this.vel.swap();
     u=this.use('advect',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uSource,this.vel.r.bind(0));
-    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation,0.5); this.draw(); this.vel.swap();
+    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation,0.35); this.draw(); this.vel.swap();
     u=this.use('advect',this.dye.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uSource,this.dye.r.bind(1));
-    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.35 + bpm/400); this.draw(); this.dye.swap();
+    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.10 + bpm/1500); this.draw(); this.dye.swap();
     // ---- show
     u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1f(u.bright,1.0); this.draw();
   }
@@ -504,8 +513,9 @@ function frame(now) {
     `bass ${Signal.audio.bass.toFixed(2)}  lvl ${Signal.audio.level.toFixed(2)}\n` +
     `beats ${Signal.audio.beats}  bpm ${Signal.audio.bpm}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
-    `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}\n` +
-    `v0.50  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
+    `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}\n` +
+    `v0.51  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  onset ${Signal.audio.onset.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
     `mic ${Audio.settings ? ('ns='+Audio.settings.noiseSuppression+' agc='+Audio.settings.autoGainControl+' ec='+Audio.settings.echoCancellation) : '?'}`;
@@ -538,7 +548,7 @@ function seg(id, items, key) {
     b.onclick = () => { Signal.user[key] = i; [...box.children].forEach(c => c.classList.remove('on')); b.classList.add('on'); };
     box.appendChild(b); });
 }
-seg('scenes', Scenes, 'scene'); seg('palettes', Palettes, 'palette');
+seg('scenes', Scenes, 'scene'); seg('palettes', Palettes, 'palette'); seg('physics', [{name:'Off'},{name:'Calm'},{name:'Full'}], 'physics');
 document.getElementById('bright').oninput = e => { Signal.user.bright = +e.target.value; canvas.style.opacity = Signal.user.bright; document.getElementById('f').style.opacity = Signal.user.bright; };
 document.getElementById('sens').oninput = e => Signal.user.sens = +e.target.value;
 document.getElementById('dbg').onclick = e => { debugEl.hidden = !debugEl.hidden; e.target.textContent = debugEl.hidden ? 'Show levels' : 'Hide levels'; };
