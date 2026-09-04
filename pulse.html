@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.53</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.54</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -82,7 +82,7 @@
 const Signal = {
   audio:  { level:0, bass:0, mid:0, high:0, beat:false, beatAge:9, bpm:0, beats:0,
             onset:0, centroid:0.5, chroma:new Float32Array(12), key:0, key2:0, keyStrength:0 },
-  motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1 },
+  motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1, rz:0, events:0 },
   gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
   user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1 },
   t:0
@@ -215,14 +215,16 @@ const Motion = {
     if (g) { m.tiltX += ((g.x||0)/9.81 - m.tiltX)*0.15; m.tiltY += ((g.y||0)/9.81 - m.tiltY)*0.15; }
     if (g) { m.gx += (SGN*(g.x||0)/9.81 - m.gx)*0.2; m.gy += (SGN*(g.y||0)/9.81 - m.gy)*0.2; }
     if (a) { const rx = SGN*(a.x||0)/9.81, ry = SGN*(a.y||0)/9.81;
-      this.bx += (rx - this.bx)*0.01; this.by += (ry - this.by)*0.01;          // slow bias estimate
-      const dz = v => Math.abs(v) < 0.03 ? 0 : v - Math.sign(v)*0.03;          // dead zone
+      this.bx += (rx - this.bx)*0.002; this.by += (ry - this.by)*0.002;        // very slow bias estimate
+      const dz = v => Math.abs(v) < 0.02 ? 0 : v - Math.sign(v)*0.02;          // dead zone
       m.ax += (dz(rx - this.bx) - m.ax)*0.5; m.ay += (dz(ry - this.by) - m.ay)*0.5;
       const mag = Math.hypot(a.x||0, a.y||0, a.z||0) / 9.81;   // in g
       const n = Math.min(1, mag / 1.5);
       m.energy += (n - m.energy) * (n > m.energy ? 0.5 : 0.06);
       m.shake = n > 0.55 * (1/Signal.user.sens); }
-    if (r) { const s = Math.hypot(r.alpha||0, r.beta||0, r.gamma||0) / 360; m.spin += (Math.min(1,s) - m.spin)*0.2; }
+    if (r) { const s = Math.hypot(r.alpha||0, r.beta||0, r.gamma||0) / 360; m.spin += (Math.min(1,s) - m.spin)*0.2;
+      m.rz += (SGN*(r.alpha||0)/180 - m.rz)*0.4; }                                   // twist around the screen normal, half-turns/s
+    m.events++;
   }
 };
 
@@ -268,8 +270,10 @@ const Fluid = {
       advect: H+`uniform sampler2D uVelocity,uSource; uniform vec2 texelSize; uniform float dt,dissipation,cap;
         void main(){ vec2 c=vUv-dt*texture2D(uVelocity,vUv).xy*texelSize; vec4 r=texture2D(uSource,c)/(1.+dissipation*dt);
           if(cap>0.){ float mx=max(r.r,max(r.g,r.b)); r.rgb*=min(1.,cap/max(mx,1e-4)); } gl_FragColor=r; }`,
-      force: H+`uniform sampler2D uVelocity,uDye; uniform vec2 force,buoy; uniform float dt;
-        void main(){ vec2 v=texture2D(uVelocity,vUv).xy; float d=dot(texture2D(uDye,vUv).rgb,vec3(.33)); v+=(force+buoy*min(d,1.5))*dt; gl_FragColor=vec4(v,0.,1.); }`,
+      force: H+`uniform sampler2D uVelocity,uDye; uniform vec2 force,buoy; uniform float dt,stir,aspect;
+        void main(){ vec2 v=texture2D(uVelocity,vUv).xy; float d=dot(texture2D(uDye,vUv).rgb,vec3(.33));
+          vec2 q=vUv-.5; q.x*=aspect; vec2 sw=vec2(-q.y,q.x)*stir;
+          v+=(force+buoy*min(d,1.5)+sw)*dt; gl_FragColor=vec4(v,0.,1.); }`,
       div: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).x,R=texture2D(uVelocity,vR).x,T=texture2D(uVelocity,vT).y,B=texture2D(uVelocity,vB).y;
         vec2 C=texture2D(uVelocity,vUv).xy; if(vL.x<0.)L=-C.x; if(vR.x>1.)R=-C.x; if(vT.y>1.)T=-C.y; if(vB.y<0.)B=-C.y; gl_FragColor=vec4(.5*(R-L+T-B),0.,0.,1.); }`,
       curl: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).y,R=texture2D(uVelocity,vR).y,T=texture2D(uVelocity,vT).x,B=texture2D(uVelocity,vB).x; gl_FragColor=vec4(.5*(R-L-T+B),0.,0.,1.); }`,
@@ -368,7 +372,8 @@ const Fluid = {
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
     const ph = [0, 0.5, 1][Signal.user.physics];
-    gl.uniform2f(u.force, -m.ax*500*ph, -m.ay*500*ph); gl.uniform2f(u.buoy, m.gx*30*ph, m.gy*30*ph); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
+    gl.uniform2f(u.force, -m.ax*5000*ph, -m.ay*5000*ph); gl.uniform2f(u.buoy, m.gx*30*ph, m.gy*30*ph);
+    gl.uniform1f(u.stir, -m.rz*2500*ph); gl.uniform1f(u.aspect, this.aspect); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
     // ---- solve
     u=this.use('curl',this.crl); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('vort',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uCurl,this.crl.bind(1));
@@ -519,8 +524,8 @@ function frame(now) {
     `beats ${Signal.audio.beats}  bpm ${Signal.audio.bpm}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
-    `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}\n` +
-    `v0.53  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
+    `v0.54  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  onset ${Signal.audio.onset.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
     `mic ${Audio.settings ? ('ns='+Audio.settings.noiseSuppression+' agc='+Audio.settings.autoGainControl+' ec='+Audio.settings.echoCancellation) : '?'}`;
