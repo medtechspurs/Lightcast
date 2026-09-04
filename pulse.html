@@ -46,6 +46,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
+  <p class="fine" style="margin:0 0 20px">Version 0.31</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -85,51 +86,87 @@ const Signal = {
 
 /* ---------------- Audio ---------------- */
 const Audio = {
-  ctx:null, analyser:null, data:null, bins:null,
-  hist:new Float32Array(90), hi:0, peak:0.25, lastBeat:0, intervals:[],
+  ctx:null, analyser:null, db:null, prev:null, bins:null,
+  floorDb:-80, ceilDb:-40,                 // adaptive range for bass level
+  flux:[], fluxT:[], fp:[0,0,0], lastBeat:0, env:[], lastBpmCalc:0,
   async start() {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }, video:false });
     const AC = window.AudioContext || window.webkitAudioContext;
-    this.ctx = new AC();
-    await this.ctx.resume();
+    this.ctx = new AC(); await this.ctx.resume();
     const src = this.ctx.createMediaStreamSource(stream);
     this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
-    this.analyser.smoothingTimeConstant = 0.35;
+    this.analyser.fftSize = 2048; this.analyser.smoothingTimeConstant = 0.15;
+    this.analyser.minDecibels = -100; this.analyser.maxDecibels = -10;
     src.connect(this.analyser);
-    this.data = new Uint8Array(this.analyser.frequencyBinCount);
-    const hz = this.ctx.sampleRate / this.analyser.fftSize;
-    const b = f => Math.max(1, Math.round(f / hz));
-    this.bins = { bass:[b(40), b(150)], mid:[b(150), b(2000)], high:[b(2000), b(8000)] };
+    const n = this.analyser.frequencyBinCount;
+    this.db = new Float32Array(n); this.prev = new Float32Array(n).fill(0);
+    this.data = new Uint8Array(n);                       // still used by Bars scene
+    const hz = this.ctx.sampleRate / this.analyser.fftSize, b = f => Math.max(1, Math.round(f/hz));
+    this.bins = { bass:[b(35), b(250)], mid:[b(250), b(2000)], high:[b(2000), b(8000)], flux:[b(30), b(5000)], lowCut:b(300) };
+    try { const tr = stream.getAudioTracks()[0].getSettings(); this.settings = tr; } catch {}
   },
-  band(lo, hi) { let s=0; for (let i=lo;i<hi;i++) s+=this.data[i]; return s/((hi-lo)*255); },
+  meanDb(lo, hi) { let s=0; for (let i=lo;i<hi;i++) s += this.db[i]; return s/(hi-lo); },
   update(now) {
     if (!this.analyser) return;
-    this.analyser.getByteFrequencyData(this.data);
-    const a = Signal.audio, B = this.bins;
-    const rawBass = this.band(...B.bass);
-    a.mid  = this.band(...B.mid);
-    a.high = this.band(...B.high);
-    a.level = (rawBass + a.mid + a.high) / 3;
+    this.analyser.getFloatFrequencyData(this.db);
+    const a = Signal.audio, B = this.bins, sens = Signal.user.sens;
 
-    // auto-gain: normalize bass against a slowly decaying peak, with a floor so silence stays dark
-    this.peak = Math.max(rawBass, this.peak * 0.9985, 0.25);
-    a.bass = Math.min(1, rawBass / this.peak);
-
-    // beat: bass energy vs rolling mean/std over ~1.5 s
-    const h = this.hist; h[this.hi] = rawBass; this.hi = (this.hi + 1) % h.length;
-    let m=0; for (const v of h) m+=v; m/=h.length;
-    let v=0; for (const x of h) v+=(x-m)*(x-m); const sd = Math.sqrt(v/h.length);
-    const k = 1.6 / Signal.user.sens;
-    a.beat = false;
-    if (rawBass > 0.12 && rawBass > m*1.25 && rawBass > m + k*sd && now - this.lastBeat > 230) {
-      a.beat = true; a.beats++;
-      if (this.lastBeat) { this.intervals.push(now - this.lastBeat); if (this.intervals.length > 8) this.intervals.shift();
-        const s=[...this.intervals].sort((x,y)=>x-y); a.bpm = Math.round(60000 / s[s.length>>1]); }
-      this.lastBeat = now;
+    // --- levels: adaptive dB window. floor tracks quiet moments, ceiling tracks peaks.
+    const bassDb = this.meanDb(...B.bass);
+    if (isFinite(bassDb)) {
+      this.floorDb += (bassDb - this.floorDb) * (bassDb < this.floorDb ? 0.05 : 0.002);
+      this.ceilDb  += (bassDb - this.ceilDb)  * (bassDb > this.ceilDb  ? 0.30 : 0.004);
+      if (this.ceilDb < this.floorDb + 12) this.ceilDb = this.floorDb + 12;
+      a.bass = Math.min(1, Math.max(0, (bassDb - this.floorDb) / (this.ceilDb - this.floorDb)));
+      a.bass = Math.pow(a.bass, 1/sens);
     }
-    a.beatAge = (now - this.lastBeat) / 1000;
+    const norm = d => Math.min(1, Math.max(0, (d - this.floorDb) / 50));
+    a.mid = norm(this.meanDb(...B.mid)); a.high = norm(this.meanDb(...B.high));
+    a.level = (a.bass + a.mid + a.high)/3;
+
+    // --- onset strength: spectral flux (only increases count), low bins weighted more
+    let f=0;
+    for (let i=B.flux[0]; i<B.flux[1]; i++) {
+      const m = Math.max(0, (this.db[i] + 100) / 90);      // 0..1 from dB
+      const d = m - this.prev[i]; this.prev[i] = m;
+      if (d > 0) f += d * (i < B.lowCut ? 3 : 1);
+    }
+    this.flux.push(f); this.fluxT.push(now);
+    while (this.fluxT.length && now - this.fluxT[0] > 1200) { this.flux.shift(); this.fluxT.shift(); }
+    let m=0; for (const v of this.flux) m += v; m /= this.flux.length || 1;
+    let vr=0; for (const v of this.flux) vr += (v-m)*(v-m); const sd = Math.sqrt(vr/(this.flux.length||1));
+    const thr = m + (1.2/sens) * sd + 0.02;
+
+    // local peak pick with one-frame delay: fp = [two ago, one ago, now]
+    this.fp = [this.fp[1], this.fp[2], f];
+    a.beat = false;
+    const [p2,p1,p0] = this.fp;
+    if (p1 > thr && p1 >= p2 && p1 > p0 && now - this.lastBeat > 180) {
+      a.beat = true; a.beats++; this.lastBeat = now;
+    }
+    a.beatAge = (now - this.lastBeat)/1000;
+
+    // --- BPM: autocorrelation of onset envelope over last 6 s, 70–180 BPM
+    this.env.push([now, f]);
+    while (this.env.length && now - this.env[0][0] > 6000) this.env.shift();
+    if (now - this.lastBpmCalc > 1000 && this.env.length > 120) {
+      this.lastBpmCalc = now;
+      const step = 10, N = 600, e = new Float32Array(N), t0 = now - 6000;
+      for (const [t,v] of this.env) { const k = Math.floor((t - t0)/step); if (k>=0 && k<N) e[k] = Math.max(e[k], v); }
+      let mean=0; for (let i=0;i<N;i++) mean+=e[i]; mean/=N; for (let i=0;i<N;i++) e[i]-=mean;
+      let best=-1, bestLag=0;
+      for (let lag=33; lag<=86; lag++) {            // 333 ms .. 857 ms
+        let c=0; for (let i=lag;i<N;i++) c += e[i]*e[i-lag];
+        c /= (N-lag);
+        // mild preference for lags whose double also correlates (suppresses half-time errors)
+        let c2=0; if (lag*2 < N) { for (let i=lag*2;i<N;i++) c2 += e[i]*e[i-lag*2]; c2 /= (N-lag*2); }
+        const score = c + 0.5*c2;
+        if (score > best) { best = score; bestLag = lag; }
+      }
+      if (best > 0) { const bpm = Math.round(60000/(bestLag*step)); a.bpm = a.bpm ? Math.round(a.bpm*0.5 + bpm*0.5) : bpm; }
+    }
+    this.lastBassDb = bassDb;
   }
 };
 
@@ -195,8 +232,8 @@ const Scenes = [
   { name:'Bloom', draw(ctx, W, H, dt) {
       const a = Signal.audio, m = Signal.motion;
       ctx.fillStyle = 'rgba(0,0,0,0.28)'; ctx.fillRect(0,0,W,H);
-      const cx = W/2 + m.tiltX * W*0.25, cy = H/2 - m.tiltY * H*0.25;
-      const R = Math.min(W,H) * (0.12 + 0.42*a.bass + 0.15*m.energy);
+      const cx = W/2 + m.tiltX * W*0.10, cy = H/2 - m.tiltY * H*0.10;
+      const R = Math.min(W,H) * (0.10 + 0.28*a.bass + 0.08*m.energy);
       const g = ctx.createRadialGradient(cx,cy,0,cx,cy,R);
       g.addColorStop(0, hsl(hue(0), 100, 70, 0.95));
       g.addColorStop(0.5, hsl(hue(1), 100, 50, 0.55));
@@ -245,7 +282,12 @@ function resize() {
   W = innerWidth; H = innerHeight;
   canvas.width = W*dpr; canvas.height = H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
+  // edge fade so the phone's outline disappears in the dark
+  const r = Math.hypot(W,H)/2;
+  vignette = ctx.createRadialGradient(W/2,H/2,r*0.30, W/2,H/2,r*0.78);
+  vignette.addColorStop(0,'rgba(0,0,0,0)'); vignette.addColorStop(1,'rgba(0,0,0,1)');
 }
+let vignette = null;
 addEventListener('resize', resize);
 
 function frame(now) {
@@ -253,13 +295,16 @@ function frame(now) {
   fps += (1/dt - fps)*0.05; drift += dt;
   Audio.update(now); Gesture.update(now);
   Scenes[Signal.user.scene].draw(ctx, W, H, dt);
+  if (vignette) { ctx.fillStyle = vignette; ctx.fillRect(0,0,W,H); }
   Bridge.update(now);
   if (!debugEl.hidden) debugEl.textContent =
     `bass ${Signal.audio.bass.toFixed(2)}  lvl ${Signal.audio.level.toFixed(2)}\n` +
     `beats ${Signal.audio.beats}  bpm ${Signal.audio.bpm}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}\n` +
-    `fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}`;
+    `v0.31  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
+    `mic ${Audio.settings ? ('ns='+Audio.settings.noiseSuppression+' agc='+Audio.settings.autoGainControl+' ec='+Audio.settings.echoCancellation) : '?'}`;
   requestAnimationFrame(frame);
 }
 
