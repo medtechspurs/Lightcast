@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.57</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.58</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -282,7 +282,9 @@ const Fluid = {
       curl: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).y,R=texture2D(uVelocity,vR).y,T=texture2D(uVelocity,vT).x,B=texture2D(uVelocity,vB).x; gl_FragColor=vec4(.5*(R-L-T+B),0.,0.,1.); }`,
       vort: H+`uniform sampler2D uVelocity,uCurl; uniform float curl,dt;
         void main(){ float L=texture2D(uCurl,vL).x,R=texture2D(uCurl,vR).x,T=texture2D(uCurl,vT).x,B=texture2D(uCurl,vB).x,C=texture2D(uCurl,vUv).x;
-          vec2 f=.5*vec2(abs(T)-abs(B),abs(R)-abs(L)); f/=length(f)+1e-4; f*=curl*C; f.y*=-1.; vec2 v=texture2D(uVelocity,vUv).xy+f*dt; gl_FragColor=vec4(clamp(v,-1000.,1000.),0.,1.); }`,
+          vec2 f=.5*vec2(abs(T)-abs(B),abs(R)-abs(L)); f/=length(f)+1e-3; f*=curl*C; f.y*=-1.;
+          f=clamp(f,-120.,120.);                                       // never let confinement run away
+          vec2 v=texture2D(uVelocity,vUv).xy+f*dt; gl_FragColor=vec4(clamp(v,-600.,600.),0.,1.); }`,
       press: H+`uniform sampler2D uPressure,uDivergence; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
         float d=texture2D(uDivergence,vUv).x; gl_FragColor=vec4((L+R+B+T-d)*.25,0.,0.,1.); }`,
       grad: H+`uniform sampler2D uPressure,uVelocity; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
@@ -380,7 +382,7 @@ const Fluid = {
     // ---- solve
     u=this.use('curl',this.crl); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('vort',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uCurl,this.crl.bind(1));
-    gl.uniform1f(u.curl, Signal.user.noSwirl ? 0 : 25 + 20*a.high); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
+    gl.uniform1f(u.curl, Signal.user.noSwirl ? 0 : 3 + 3*a.high); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
     u=this.use('div',this.div); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('clear',this.prs.w); gl.uniform1i(u.uTexture,this.prs.r.bind(0)); gl.uniform1f(u.value,0.8); this.draw(); this.prs.swap();
     for (let i=0;i<14;i++) { u=this.use('press',this.prs.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uDivergence,this.div.bind(0)); gl.uniform1i(u.uPressure,this.prs.r.bind(1)); this.draw(); this.prs.swap(); }
@@ -552,7 +554,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.57  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.58  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  onset ${Signal.audio.onset.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
