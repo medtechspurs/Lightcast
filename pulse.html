@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.58</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.59</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -82,7 +82,8 @@
 
 const Signal = {
   audio:  { level:0, bass:0, mid:0, high:0, beat:false, beatAge:9, bpm:0, beats:0,
-            onset:0, centroid:0.5, chroma:new Float32Array(12), key:0, key2:0, keyStrength:0 },
+            onset:0, centroid:0.5, chroma:new Float32Array(12), key:0, key2:0, keyStrength:0,
+            note:false, noteStrength:0, notePc:0, noteOct:0, notes:0 },
   motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1, rz:0, events:0 },
   gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
   user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1, noHits:false, noSparks:false, noSwirl:false },
@@ -94,6 +95,7 @@ const Audio = {
   ctx:null, analyser:null, db:null, prev:null, bins:null,
   floorDb:-80, ceilDb:-40,                 // adaptive range for bass level
   flux:[], fluxT:[], fp:[0,0,0], lastBeat:0, env:[], lastBpmCalc:0,
+  nflux:[], nfluxT:[], np:[0,0,0], lastNote:0, nbin:[0,0,0],
   async start() {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio:{ echoCancellation:false, noiseSuppression:false, autoGainControl:false }, video:false });
@@ -108,7 +110,7 @@ const Audio = {
     this.db = new Float32Array(n); this.prev = new Float32Array(n).fill(0);
     this.data = new Uint8Array(n);                       // still used by Bars scene
     const hz = this.ctx.sampleRate / this.analyser.fftSize, b = f => Math.max(1, Math.round(f/hz));
-    this.bins = { bass:[b(35), b(250)], mid:[b(250), b(2000)], high:[b(2000), b(8000)], flux:[b(30), b(5000)], lowCut:b(300), chroma:[b(60), b(2500)] };
+    this.bins = { bass:[b(35), b(250)], mid:[b(250), b(2000)], high:[b(2000), b(8000)], flux:[b(30), b(5000)], lowCut:b(300), chroma:[b(60), b(2500)], note:[b(250), b(5000)] };
     this.hz = hz;
     this.pc = new Int8Array(n); for (let i=1;i<n;i++) this.pc[i] = ((Math.round(69 + 12*Math.log2(i*hz/440)) % 12) + 12) % 12;
     try { const tr = stream.getAudioTracks()[0].getSettings(); this.settings = tr; } catch {}
@@ -151,11 +153,26 @@ const Audio = {
     }
 
     // --- onset strength: spectral flux (only increases count), low bins weighted more
-    let f=0;
+    let f=0, nf=0, nbest=0, nbin=0;
     for (let i=B.flux[0]; i<B.flux[1]; i++) {
       const m = Math.max(0, (this.db[i] + 100) / 90);      // 0..1 from dB
       const d = m - this.prev[i]; this.prev[i] = m;
-      if (d > 0) f += d * (i < B.lowCut ? 3 : 1);
+      if (d > 0) { f += d * (i < B.lowCut ? 3 : 1);
+        if (i >= B.note[0]) { nf += d; if (d > nbest) { nbest = d; nbin = i; } } }
+    }
+    // --- note onsets: mid/high band, fast and sensitive; remember which bin jumped most
+    this.nflux.push(nf); this.nfluxT.push(now);
+    while (this.nfluxT.length && now - this.nfluxT[0] > 1000) { this.nflux.shift(); this.nfluxT.shift(); }
+    let nm=0; for (const v of this.nflux) nm += v; nm /= this.nflux.length || 1;
+    let nv=0; for (const v of this.nflux) nv += (v-nm)*(v-nm); const nsd = Math.sqrt(nv/(this.nflux.length||1));
+    const nthr = nm + (0.9/sens) * nsd + 0.01;
+    this.np = [this.np[1], this.np[2], nf]; this.nbin = [this.nbin[1], this.nbin[2], nbin];
+    a.note = false;
+    if (this.np[1] > nthr && this.np[1] >= this.np[0] && this.np[1] > this.np[2] && now - this.lastNote > 65) {
+      a.note = true; a.notes++; this.lastNote = now;
+      a.noteStrength = Math.min(1, (this.np[1] - nm) / (2.5*nsd + 0.03));
+      const midi = 69 + 12*Math.log2(Math.max(1, this.nbin[1]) * this.hz / 440);
+      a.notePc = ((Math.round(midi) % 12) + 12) % 12; a.noteOct = Math.min(1, Math.max(0, (midi - 45) / 48));
     }
     this.flux.push(f); this.fluxT.push(now);
     while (this.fluxT.length && now - this.fluxT[0] > 1200) { this.flux.shift(); this.fluxT.shift(); }
@@ -167,7 +184,7 @@ const Audio = {
     this.fp = [this.fp[1], this.fp[2], f];
     a.beat = false;
     const [p2,p1,p0] = this.fp;
-    if (p1 > thr && p1 >= p2 && p1 > p0 && now - this.lastBeat > 180) {
+    if (p1 > thr && p1 >= p2 && p1 > p0 && now - this.lastBeat > 120) {
       a.beat = true; a.beats++; this.lastBeat = now;
       a.onset = Math.min(1, (p1 - m) / (3*sd + 0.05));     // how hard the hit landed, 0..1
     }
@@ -366,6 +383,14 @@ const Fluid = {
         this.push(cx-Math.cos(t)*d/this.aspect, cy-Math.sin(t)*d, -Math.cos(t)*sp, -Math.sin(t)*sp, 0.0015); }
       this.lastHue = h;
     }
+    if (a.note && !Signal.user.noHits) {                                // every pluck / note is its own puff
+      const h = (fifths(a.notePc) + warm*0.5 + 360) % 360;
+      const ang = a.notePc * Math.PI/6 + Math.PI/2, dist = 0.10 + 0.12*a.noteOct;
+      const px = cx + Math.cos(ang)*dist/this.aspect, py = cy + Math.sin(ang)*dist;
+      const [r,g,b] = hsl2rgb(h, 0.95, 0.55 + 0.15*a.noteOct);
+      const amt = 0.35 + 0.65*a.noteStrength;
+      this.splat(px, py, r*amt, g*amt, b*amt, 0.0007 + 0.0012*a.noteStrength, 60 + 120*a.noteStrength);
+    }
     if (a.bass > 0.05) {                                              // continuous heat between hits
       const [r,g,b] = hsl2rgb((this.lastHue + 20)%360, 0.7, 0.45); const amt = 0.03*a.bass;
       this.splat(cx,cy, r*amt,g*amt,b*amt, 0.0015, 0);
@@ -550,11 +575,11 @@ function frame(now) {
   Bridge.update(now);
   if (!debugEl.hidden) debugEl.textContent =
     `bass ${Signal.audio.bass.toFixed(2)}  lvl ${Signal.audio.level.toFixed(2)}\n` +
-    `beats ${Signal.audio.beats}  bpm ${Signal.audio.bpm}\n` +
+    `beats ${Signal.audio.beats}  notes ${Signal.audio.notes}  bpm ${Signal.audio.bpm}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.58  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.59  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  onset ${Signal.audio.onset.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
