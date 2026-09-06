@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.84</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.85</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -348,31 +348,47 @@ const Fluid = {
       grad: H+`uniform sampler2D uPressure,uVelocity; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
         vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B); gl_FragColor=vec4(v,0.,1.); }`,
       clear: H+`uniform sampler2D uTexture; uniform float value; void main(){ gl_FragColor=value*texture2D(uTexture,vUv); }`,
-      charge: H+`uniform sampler2D uCharge,uDye,uVelocity; uniform vec2 texelSize,velTexel; uniform float dt,decay,spread,reach;
+      charge: H+`uniform sampler2D uCharge,uDye,uVelocity; uniform vec2 texelSize,velTexel,seedPos,size; uniform float dt,decay,grow,stepId,seedR,aspect,branchP;
+        float hash(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
         float dens(vec2 p){ vec3 c=texture2D(uDye,p).rgb; return max(c.r,max(c.g,c.b)); }
+        vec2 ov(float k){ float a=k*0.785398; float cx=cos(a), sy=sin(a); return vec2(step(.1,abs(cx))*sign(cx), step(.1,abs(sy))*sign(sy)); }
         void main(){
-          vec2 adv=vUv-dt*texture2D(uVelocity,vUv).xy*velTexel;          // charge rides the smoke
-          float q=texture2D(uCharge,adv).x*decay;
-          float cond=smoothstep(.012,.12,dens(vUv));                       // conducts only through smoke
-          vec2 o=texelSize*reach; float n=0.;
-          n=max(n,texture2D(uCharge,vUv+vec2(o.x,0.)).x); n=max(n,texture2D(uCharge,vUv-vec2(o.x,0.)).x);
-          n=max(n,texture2D(uCharge,vUv+vec2(0.,o.y)).x); n=max(n,texture2D(uCharge,vUv-vec2(0.,o.y)).x);
-          n=max(n,texture2D(uCharge,vUv+o).x); n=max(n,texture2D(uCharge,vUv-o).x);
-          n=max(n,texture2D(uCharge,vUv+vec2(o.x,-o.y)).x); n=max(n,texture2D(uCharge,vUv-vec2(o.x,-o.y)).x);
-          q=max(q,n*cond*spread);
-          gl_FragColor=vec4(q,0.,0.,1.); }`,
+          vec2 pos=vUv;
+          if(dt>0.){ vec2 p=vUv-dt*texture2D(uVelocity,vUv).xy*velTexel; pos=(floor(p*size)+.5)*texelSize; }   // ride the smoke, snapped to cells
+          vec4 me=texture2D(uCharge,pos);
+          float q=me.r*decay, tip=0., dir=me.b;
+          float d=dens(vUv);
+          if(grow>.5 && me.r<.5){
+            vec2 sp=vUv-seedPos; sp.x*=aspect; float sd=length(sp);
+            if(seedR>0. && sd<seedR && sd>seedR*.55 && hash(vUv*777.+stepId)<.10){
+              q=1.; tip=1.; float an=atan(sp.y,sp.x); dir=(mod(floor(an/0.785398+.5)+8.,8.)+.5)/8.;
+            } else {
+              for(int k=0;k<8;k++){
+                vec2 o=ov(float(k)); vec2 tp=vUv-o*texelSize;
+                vec4 t=texture2D(uCharge,tp);
+                if(t.g<.5) continue;                                     // only tips grow
+                float base=floor(t.b*8.); vec2 tc=floor(tp*size);
+                float best=-1., bj=base;
+                for(int m=-1;m<=1;m++){ float j=mod(base+float(m)+8.,8.); vec2 fp=tp+ov(j)*texelSize;
+                  float sc=dens(fp)*1.2+hash(tc+float(m)*3.1+stepId*.37)*.45-abs(float(m))*.05; if(sc>best){best=sc;bj=j;} }
+                float lit=0.;
+                if(bj==float(k)) lit=1.;
+                if(hash(tc*1.7+stepId*.53)<branchP){ float j2=mod(base+(hash(tc*2.3+stepId)<.5?2.:-2.)+8.,8.); if(j2==float(k)) lit=1.; }
+                if(lit>.5){ float hd=hash(vUv*555.+stepId*.91); if(d<.012 && hd<.92) lit=0.; else if(d<.05 && hd<.4) lit=0.; }
+                if(lit>.5){ q=1.; tip=1.; dir=(float(k)+.5)/8.; break; }
+              }
+            }
+          }
+          gl_FragColor=vec4(q,tip,dir,1.); }`,
       show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
         float dens(vec2 p){ vec3 c=texture2D(uTexture,p).rgb; return max(c.r,max(c.g,c.b)); }
         void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
-        // --- lightning: charge lights the veins of the smoke
+        // --- lightning: one-cell tendrils, thin halo, no haze
         float ch=texture2D(uCharge,vUv).x;
-        if(ch>0.003){
-          float d=max(c.r,max(c.g,c.b)); float dn=(dens(vL)+dens(vR)+dens(vT)+dens(vB))*.25;
-          float ridge=clamp((d-dn)*16.+.15,0.,1.);
-          float fl=.7+.3*sin(time*90.+vUv.y*40.)*sin(time*73.+vUv.x*35.);
-          float b=pow(ch,1.4)*(.35+1.6*ridge*ridge)*fl*bolt;
-          vec3 bc=mix(c/max(d,1e-3),vec3(1.),.45);
-          c+=bc*b*3.; }
+        float g1=max(max(texture2D(uCharge,vL).x,texture2D(uCharge,vR).x),max(texture2D(uCharge,vT).x,texture2D(uCharge,vB).x));
+        float line=smoothstep(.3,.7,ch), halo=smoothstep(.3,.7,g1)*.45;
+        if(line+halo>.01){ float d=max(c.r,max(c.g,c.b)); float fl=.8+.2*sin(time*95.+vUv.y*50.);
+          vec3 bc=mix(c/max(d,1e-3),vec3(1.),.6); c+=bc*(line*3.2+halo)*fl*bolt; }
         c=max(c,0.); float mx=max(c.r,max(c.g,c.b)); float k=mx/(1.+mx*.45); c*=k/max(mx,1e-4);
         c=pow(c*bright*vg,vec3(1./1.15));
         // --- the orb: a small churning sphere of light at the source
@@ -502,20 +518,24 @@ const Fluid = {
       const [sx,sy,ex,ey] = at(11, 0.05 + 0.08*Math.random());
       this.splat(sx,sy, r*0.35,g*0.35,b*0.35, 0.0003, 40);
     }
-    // ---- flick -> lightning: seed charge at the orb; it spreads through the smoke and rides with it
+    // ---- flick -> lightning: tendrils grow cell by cell through the smoke and ride with it
+    let seedR = 0;
     if (m.flick) { m.flick = false; this.strikeT = now; this.strikeStr = m.flickStrength; this.strikes = (this.strikes||0)+1;
-      let u=this.use('splat',this.chg.w); gl.uniform1i(u.uTarget,this.chg.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
-      gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,1.5,0,0); gl.uniform1f(u.radius,0.0006+0.001*m.flickStrength); gl.uniform1f(u.radial,0); this.draw(); this.chg.swap();
-      u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
+      seedR = 0.012 + 0.010*m.flickStrength;
+      let u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
       gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,250*m.flickStrength,0,0); gl.uniform1f(u.radius,0.004); gl.uniform1f(u.radial,1); this.draw(); this.vel.swap(); }
     {
-      const age = this.strikeT ? (now - this.strikeT) : 1e9, growing = age < 240 + 120*(this.strikeStr||0);
-      const steps = growing ? 4 : 1;
+      const age = this.strikeT ? (now - this.strikeT) : 1e9, growing = age < 230 + 120*(this.strikeStr||0);
+      const steps = growing ? 8 : 1;
+      this.stepId = (this.stepId||0);
       for (let i=0;i<steps;i++) {
         const u=this.use('charge',this.chg.w); gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform2f(u.velTexel,this.vel.tx,this.vel.ty);
+        gl.uniform2f(u.size,this.dye.r.w,this.dye.r.h); gl.uniform1f(u.aspect,this.aspect);
         gl.uniform1i(u.uCharge,this.chg.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1)); gl.uniform1i(u.uVelocity,this.vel.r.bind(2));
-        gl.uniform1f(u.dt, i===0 ? dt : 0); gl.uniform1f(u.decay, growing ? Math.exp(-dt*2.5/steps) : Math.exp(-dt*11));
-        gl.uniform1f(u.spread, growing ? 0.992 : 0); gl.uniform1f(u.reach, 2.0 + Math.random()*1.5); this.draw(); this.chg.swap(); }
+        gl.uniform1f(u.dt, i===0 ? dt : 0); gl.uniform1f(u.decay, growing ? 1.0 : Math.exp(-dt*9));
+        gl.uniform1f(u.grow, growing ? 1 : 0); gl.uniform1f(u.stepId, ++this.stepId);
+        gl.uniform2f(u.seedPos, cx, cy); gl.uniform1f(u.seedR, i===0 ? seedR : 0); gl.uniform1f(u.branchP, 0.05 + 0.05*(this.strikeStr||0));
+        this.draw(); this.chg.swap(); }
     }
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
@@ -723,7 +743,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  charge ${Fluid.meanCharge==null?'-':Fluid.meanCharge.toFixed(4)}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.84  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.85  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
