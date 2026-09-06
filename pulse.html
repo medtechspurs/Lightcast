@@ -49,7 +49,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.80</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.81</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -68,7 +68,10 @@
 </div>
 <div id="debug" hidden></div>
 
+<div id="errbox" hidden style="position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:99;background:rgba(160,0,0,.85);color:#fff;font:12px/1.4 ui-monospace,Menlo,monospace;padding:8px 10px;border-radius:8px;white-space:pre-wrap;word-break:break-word"></div>
 <script>
+window.addEventListener('error', e => { const b=document.getElementById('errbox'); b.hidden=false; b.textContent += (e.message||e) + (e.filename ? ' @' + (e.lineno||'') : '') + '\n'; });
+window.addEventListener('unhandledrejection', e => { const b=document.getElementById('errbox'); b.hidden=false; b.textContent += 'Promise: ' + (e.reason && (e.reason.message||e.reason)) + '\n'; });
 /* ============================================================
    Pulse — layer 1
    Architecture (kept deliberately modular so later layers slot in):
@@ -718,7 +721,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `flicks ${Signal.motion.flicks}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.80  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.81  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
