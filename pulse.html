@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.86</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.90</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -194,7 +194,7 @@ const Audio = {
     this.np = [this.np[1], this.np[2], nf]; this.nbin = [this.nbin[1], this.nbin[2], nbin];
     a.note = false;
     if (this.np[1] > nthr && this.np[1] >= this.np[0] && this.np[1] > this.np[2] && now - this.lastNote > 65) {
-      a.note = true; a.notes++; this.lastNote = now;
+      a.note = true; a.notes++; this.lastNote = now; Audio.lastNote = now;
       a.noteStrength = Math.min(1, (this.np[1] - nm) / (2.5*nsd + 0.03));
       const ld = Math.max(this.nMax[1], this.nMax[2]);                 // level at/just after the onset
       a.noteLoud = Math.min(1, Math.max(0, (ld - this.nFloor) / (this.nCeil - this.nFloor)));
@@ -326,16 +326,21 @@ const Fluid = {
         void main(){ vec2 p=vUv-point; p.x*=aspect; float g=exp(-dot(p,p)/radius); vec3 add=color*g;
           if(radial>0.5){ vec2 d=normalize(p+vec2(1e-4,1e-4)); add=vec3(d*color.x*g,0.); }
           gl_FragColor=vec4(texture2D(uTarget,vUv).xyz+add,1.); }`,
-      advect: H+`uniform sampler2D uVelocity,uSource; uniform vec2 texelSize; uniform float dt,dissipation,cap;
+      advect: H+`uniform sampler2D uVelocity,uSource; uniform vec2 texelSize,drainPos; uniform float dt,dissipation,cap,drainK,aspect;
         void main(){ vec2 c=vUv-dt*texture2D(uVelocity,vUv).xy*texelSize; vec4 r=texture2D(uSource,c)/(1.+dissipation*dt);
           if(cap>0.){ r.rgb=max(r.rgb,0.); float mx=max(r.r,max(r.g,r.b)); r.rgb*=min(1.,cap/max(mx,1e-4));
+            if(drainK>0.){ vec2 dq=vUv-drainPos; dq.x*=aspect; r.rgb*=max(0.,1.-drainK*exp(-dot(dq,dq)/.0022)*dt); }
             if(c.x<0.||c.x>1.||c.y<0.||c.y>1.) r=vec4(0.); }        // beyond the edge is empty air
           gl_FragColor=r; }`,
-      force: H+`uniform sampler2D uVelocity,uDye; uniform vec2 force,buoy; uniform float dt,stir,aspect;
+      force: H+`uniform sampler2D uVelocity,uDye; uniform vec2 force,buoy,drainPos; uniform float dt,stir,aspect,drainPull,whirl;
         void main(){ vec2 v=texture2D(uVelocity,vUv).xy; float d=dot(texture2D(uDye,vUv).rgb,vec3(.33));
           vec2 q=vUv-.5; q.x*=aspect; vec2 sw=vec2(-q.y,q.x)*stir;
-          v+=(force+buoy*min(d,1.5)+sw)*dt; gl_FragColor=vec4(v,0.,1.); }`,
-      div: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).x,R=texture2D(uVelocity,vR).x,T=texture2D(uVelocity,vT).y,B=texture2D(uVelocity,vB).y;
+          vec2 dq=vUv-drainPos; dq.x*=aspect; float len=length(dq)+1e-4;
+          vec2 pull=(-dq/len)*drainPull*(.12/(len+.12));
+          vec2 wh=vec2(-dq.y,dq.x)/len*whirl*exp(-len*len/.012);
+          v+=(force+buoy*min(d,1.5)+sw+(pull+wh)*step(.02,d))*dt; gl_FragColor=vec4(v,0.,1.); }`,
+      div: H+`uniform sampler2D uVelocity; uniform float walls; void main(){ float L=texture2D(uVelocity,vL).x,R=texture2D(uVelocity,vR).x,T=texture2D(uVelocity,vT).y,B=texture2D(uVelocity,vB).y;
+        if(walls>.5){ vec2 C=texture2D(uVelocity,vUv).xy; if(vL.x<0.)L=-C.x; if(vR.x>1.)R=-C.x; if(vT.y>1.)T=-C.y; if(vB.y<0.)B=-C.y; }
         gl_FragColor=vec4(.5*(R-L+T-B),0.,0.,1.); }`,
       curl: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).y,R=texture2D(uVelocity,vR).y,T=texture2D(uVelocity,vT).x,B=texture2D(uVelocity,vB).x; gl_FragColor=vec4(.5*(R-L-T+B),0.,0.,1.); }`,
       vort: H+`uniform sampler2D uVelocity,uCurl; uniform float curl,dt;
@@ -345,8 +350,10 @@ const Fluid = {
           vec2 v=texture2D(uVelocity,vUv).xy+f*dt; gl_FragColor=vec4(clamp(v,-600.,600.),0.,1.); }`,
       press: H+`uniform sampler2D uPressure,uDivergence; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
         float d=texture2D(uDivergence,vUv).x; gl_FragColor=vec4((L+R+B+T-d)*.25,0.,0.,1.); }`,
-      grad: H+`uniform sampler2D uPressure,uVelocity; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
-        vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B); gl_FragColor=vec4(v,0.,1.); }`,
+      grad: H+`uniform sampler2D uPressure,uVelocity; uniform float walls; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
+        vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B);
+        float wall=smoothstep(0.,.04,vUv.x)*smoothstep(0.,.04,1.-vUv.x)*smoothstep(0.,.025,vUv.y)*smoothstep(0.,.025,1.-vUv.y);
+        v*=mix(1.,wall,walls); gl_FragColor=vec4(v,0.,1.); }`,
       clear: H+`uniform sampler2D uTexture; uniform float value; void main(){ gl_FragColor=value*texture2D(uTexture,vUv); }`,
       charge: H+`uniform sampler2D uCharge,uDye,uVelocity; uniform vec2 texelSize,velTexel,seedPos,size; uniform float dt,decay,grow,stepId,seedR,aspect,branchP;
         float hash(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
@@ -391,11 +398,34 @@ const Fluid = {
             }
           }
           gl_FragColor=vec4(q,tip,dir,1.0); }`,
-      show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
+      froth: H+`uniform sampler2D uFroth,uVelocity,uDye,uCurl; uniform vec2 velTexel; uniform float dt,decay,gen;
+        void main(){ vec2 vel=texture2D(uVelocity,vUv).xy; vec2 c=vUv-dt*vel*velTexel; vec2 f=texture2D(uFroth,c).xy*decay;
+          vec3 dye=texture2D(uDye,vUv).rgb; float d=max(dye.r,max(dye.g,dye.b));
+          float sp=length(vel)/260.; float cu=abs(texture2D(uCurl,vUv).x)/60.;
+          float g=(smoothstep(.5,1.1,sp)+smoothstep(.6,1.2,cu))*smoothstep(.04,.15,d)*gen;
+          float viol=smoothstep(1.0,2.0,sp+cu)*smoothstep(.04,.15,d);
+          gl_FragColor=vec4(max(f.x,min(1.,g)),max(f.y,viol),0.,1.); }`,
+      show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt,water; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
         float dens(vec2 p){ vec3 c=texture2D(uTexture,p).rgb; return max(c.r,max(c.g,c.b)); }
+        vec3 hue2rgb(float h){ vec3 k=mod(vec3(5.,3.,1.)+h/60.,6.); return 1.-clamp(min(k,4.-k),0.,1.); }
         void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
+        if(water>.5){
+          float d=max(c.r,max(c.g,c.b)); vec3 tint=c/max(d,1e-3);
+          float depth=smoothstep(0.,.9,d);
+          vec2 gradv=vec2(dens(vR)-dens(vL), dens(vT)-dens(vB));
+          vec3 nrm=normalize(vec3(-gradv*7.,1.)); float shade=max(dot(nrm,normalize(vec3(-.45,.55,.7))),0.);
+          vec3 deep=vec3(.02,.10,.26), shallow=vec3(.10,.42,.58);
+          vec3 wc=mix(shallow,deep,depth)*mix(vec3(1.),tint,.4);
+          float spec=pow(shade,22.)*.9;
+          c=(wc*(.5+.7*shade)+vec3(spec))*depth;
+          vec2 fr=texture2D(uCharge,vUv).xy; float foam=smoothstep(.12,.6,fr.x);
+          float hh=fract(vUv.x*5.3+vUv.y*3.1+time*.15)*360.;
+          vec3 foamc=mix(vec3(1.),hue2rgb(hh),smoothstep(.25,.8,fr.y)*.85);
+          c=mix(c,foamc,foam*.92);
+          vg=1.;
+        }
         // --- lightning: one-cell tendrils, thin halo, no haze
-        float ch=texture2D(uCharge,vUv).x;
+        float ch=water>.5?0.:texture2D(uCharge,vUv).x;
         float g1=max(max(texture2D(uCharge,vL).x,texture2D(uCharge,vR).x),max(texture2D(uCharge,vT).x,texture2D(uCharge,vB).x));
         float line=smoothstep(.3,.7,ch), lhalo=smoothstep(.3,.7,g1)*.45;
         if(line+lhalo>.01){ float d=max(c.r,max(c.g,c.b)); float fl=.8+.2*sin(time*95.+vUv.y*50.);
@@ -450,6 +480,7 @@ const Fluid = {
     this.aspect = ar;
     return !!(this.vel&&this.dye&&this.chg&&this.prs&&this.div&&this.crl);
   },
+  clearAll() { const gl=this.gl; for (const b of [this.vel,this.dye,this.chg,this.prs]) for (const f of [b.r,b.w]) { gl.bindFramebuffer(gl.FRAMEBUFFER,f.f); gl.viewport(0,0,f.w,f.h); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); } },
   use(k, target) { const gl=this.gl, P=this.prog[k]; gl.useProgram(P.p);
     if (target) { gl.bindFramebuffer(gl.FRAMEBUFFER,target.f); gl.viewport(0,0,target.w,target.h); }
     else { gl.bindFramebuffer(gl.FRAMEBUFFER,null); gl.viewport(0,0,this.cv.width,this.cv.height); }
@@ -468,6 +499,11 @@ const Fluid = {
   step(dt, now) {
     const gl=this.gl, a=Signal.audio, m=Signal.motion, bpm=a.bpm||120;
     dt = Math.min(0.033, Math.max(0.008, dt));
+    const WATER = !!Scenes[Signal.user.scene].water;
+    if (WATER !== this.wasWater) { this.wasWater = WATER; this.clearAll(); }
+    this.intensity = (this.intensity||0) + ((Math.min(1, a.level*1.6 + 0.3*Math.exp(-a.beatAge*3) + 0.2*Math.exp(-((now-(Audio.lastNote||0))/1000)*4))) - (this.intensity||0)) * 0.05;
+    const INT = this.intensity;
+    const K = WATER ? 0.75 : 1;                                             // water injects a little less
     // ---- music -> gas
     const fifths = k => ((k*7)%12)*30, warm=(0.5-a.centroid)*50;
     const cx = 0.5 + m.tiltX*0.06, cy = 0.5 - m.tiltY*0.06;
@@ -477,7 +513,7 @@ const Fluid = {
     const at = (k, d) => { const [x,y] = spoke(k); return [cx + x*d/this.aspect, cy + y*d, x, y]; };
     // dial colors: dark blue at 12 -> purples/greens -> bright yellow & pink by 11
     const DIAL = [[235,.22],[262,.24],[150,.24],[285,.28],[210,.34],[185,.40],[160,.46],[120,.50],[90,.55],[55,.60],[330,.62],[45,.68]];
-    const dial = (k, boost=0) => hsl2rgb(DIAL[k][0], 0.92, Math.min(0.8, DIAL[k][1] + boost));
+    const dial = (k, boost=0) => WATER ? hsl2rgb(172 + k*4, 0.6, 0.48 + boost*0.5) : hsl2rgb(DIAL[k][0], 0.92, Math.min(0.8, DIAL[k][1] + boost));
     if (a.beat && !Signal.user.noHits) {
       const L = Math.pow(a.hitLoud, 1.6);                              // steep: quiet hits tiny, loud hits huge
       const blast = a.hitLoud > 0.7 && a.onset > 0.45;
@@ -491,9 +527,12 @@ const Fluid = {
       const amt = (0.25 + 2.4*L) * (blast ? 1.3 : 1) * (0.6 + 0.4*a.onset);
       const [kx,ky,ex,ey] = at(0, 0.02 + 0.04*L);
       this.remember(kx + ex*0.08/this.aspect, ky + ey*0.08, 0);
+      if (WATER) { const [wr,wg,wb] = dial(0, L); for (let i=0;i<3;i++) { const [jx,jy] = at(0, 0.03 + i*0.025); const aa = K*amt*(1-i*0.25)*0.5;
+          this.splat(jx,jy, wr*aa,wg*aa,wb*aa, 0.0006 + 0.002*L, 0); this.push(jx,jy, ex*(300 + 700*L), ey*(300 + 700*L), 0.0008 + 0.002*L); } }
+      else {
       this.splat(kx,ky, r*amt,g*amt,b*amt, 0.0008 + 0.009*L, 20 + 160*L);
-      this.push(kx,ky, ex*(150 + 500*L), ey*(150 + 500*L), 0.0015 + 0.004*L);              // shove it outward along the spoke
-      if (a.hitLoud > 0.6) this.splat(kx,ky, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
+      this.push(kx,ky, ex*(150 + 500*L), ey*(150 + 500*L), 0.0015 + 0.004*L); }             // shove it outward along the spoke
+      if (!WATER && a.hitLoud > 0.6) this.splat(kx,ky, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
       const n = blast ? 3 : (L > 0.3 ? 1 : 0);                        // off-center puffs for texture, in opposite pairs (zero net momentum)
       for (let i=0;i<n;i++) { const t=Math.random()*Math.PI*2, d=0.03+0.05*Math.random(), sp=300*L*(0.5+a.onset);
         this.push(cx+Math.cos(t)*d/this.aspect, cy+Math.sin(t)*d,  Math.cos(t)*sp,  Math.sin(t)*sp, 0.0015);
@@ -506,36 +545,47 @@ const Fluid = {
       this.remember(px + ex*0.09/this.aspect, py + ey*0.09, a.noteBand);
       const [r,g,b] = dial(a.noteBand, 0.12*NL);
       const amt = 0.12 + 1.6*NL * (0.7 + 0.3*a.noteStrength);
+      if (WATER) { for (let i=0;i<3;i++) { const [jx,jy] = at(a.noteBand, 0.03 + i*0.02); const aa = K*amt*(1-i*0.25)*0.55;
+          this.splat(jx,jy, r*aa,g*aa,b*aa, 0.0003 + 0.0012*NL, 0); this.push(jx,jy, ex*(250 + 650*NL), ey*(250 + 650*NL), 0.0005 + 0.0012*NL); } }
+      else {
       this.splat(px, py, r*amt, g*amt, b*amt, 0.0003 + 0.0035*NL, 10 + 60*NL);
-      this.push(px, py, ex*(120 + 420*NL), ey*(120 + 420*NL), 0.0008 + 0.002*NL);
+      this.push(px, py, ex*(120 + 420*NL), ey*(120 + 420*NL), 0.0008 + 0.002*NL); }
     }
     if (a.bass > 0.08) {                                              // sustained bass: a steady dark plume, not puffs
       const bb = a.bass*a.bass;
-      const [r,g,b] = hsl2rgb(250 + 30*Math.sin(now/4000), 0.85, 0.26); const amt = 0.10*bb;
+      const [r,g,b] = WATER ? dial(0, 0.1) : hsl2rgb(250 + 30*Math.sin(now/4000), 0.85, 0.26); const amt = 0.10*bb*K;
       const [bx,by,ex,ey] = at(0, 0.02);
       this.splat(bx,by, r*amt,g*amt,b*amt, 0.0012 + 0.002*bb, 0);
       this.push(bx,by, ex*(30 + 120*bb), ey*(30 + 120*bb), 0.0012);
     }
     for (let k=1;k<12;k++) {                                            // each spoke breathes with its band
       const v = a.bands[k]; if (v < 0.18) continue;
-      const vv = (v-0.18)/0.82, amt = 0.045*vv*vv;
+      const vv = (v-0.18)/0.82, amt = 0.045*vv*vv*K;
       const [sx,sy,ex,ey] = at(k, 0.025);
       const [r,g,b] = dial(k);
       this.splat(sx,sy, r*amt,g*amt,b*amt, 0.0006 + 0.0008*vv, 0);
       if (vv > 0.5) this.push(sx,sy, ex*90*vv, ey*90*vv, 0.0008);
     }
-    if (!Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
+    if (!WATER && !Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
       const [r,g,b] = dial(11, 0.1);
       const [sx,sy,ex,ey] = at(11, 0.05 + 0.08*Math.random());
       this.splat(sx,sy, r*0.35,g*0.35,b*0.35, 0.0003, 40);
     }
     // ---- flick -> lightning: tendrils grow cell by cell through the smoke and ride with it
     let seedR = 0;
+    if (m.flick && WATER) { m.flick = false; this.strikes = (this.strikes||0)+1;
+      let u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
+      gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,900*m.flickStrength,0,0); gl.uniform1f(u.radius,0.012); gl.uniform1f(u.radial,1); this.draw(); this.vel.swap();
+      const [wr,wg,wb] = dial(6, 0.2), aa = 0.5*m.flickStrength; this.splat(cx,cy, wr*aa,wg*aa,wb*aa, 0.006, 0); }
     if (m.flick) { m.flick = false; this.strikeT = now; this.strikeStr = m.flickStrength; this.strikes = (this.strikes||0)+1;
       seedR = 0.012 + 0.010*m.flickStrength;
       let u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
       gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,250*m.flickStrength,0,0); gl.uniform1f(u.radius,0.004); gl.uniform1f(u.radial,1); this.draw(); this.vel.swap(); }
-    {
+    if (WATER) {                                                          // froth field rides the flow
+      const u=this.use('froth',this.chg.w); gl.uniform2f(u.velTexel,this.vel.tx,this.vel.ty);
+      gl.uniform1i(u.uFroth,this.chg.r.bind(0)); gl.uniform1i(u.uVelocity,this.vel.r.bind(1)); gl.uniform1i(u.uDye,this.dye.r.bind(2)); gl.uniform1i(u.uCurl,this.crl.bind(3));
+      gl.uniform1f(u.dt,dt); gl.uniform1f(u.decay,Math.exp(-dt*1.6)); gl.uniform1f(u.gen,1.0); this.draw(); this.chg.swap();
+    } else {
       const age = this.strikeT ? (now - this.strikeT) : 1e9, growing = age < 230 + 120*(this.strikeStr||0);
       const steps = growing ? 8 : 1;
       this.stepId = (this.stepId||0);
@@ -551,24 +601,28 @@ const Fluid = {
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
     const ph = [0, 0.5, 1][Signal.user.physics];
-    gl.uniform2f(u.force, -m.ax*1875*ph, -m.ay*1875*ph); gl.uniform2f(u.buoy, 0, 0);   // rise force disabled while we pin down the drift
-    gl.uniform1f(u.stir, -m.rz*1875*ph); gl.uniform1f(u.aspect, this.aspect); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
+    const windK = WATER ? 2600 : 1875;
+    gl.uniform2f(u.force, -m.ax*windK*ph, -m.ay*windK*ph); gl.uniform2f(u.buoy, 0, 0);   // no vertical gravity: the tray lies flat
+    gl.uniform1f(u.stir, -m.rz*(WATER?2400:1875)*ph); gl.uniform1f(u.aspect, this.aspect);
+    gl.uniform2f(u.drainPos, cx, cy);
+    gl.uniform1f(u.drainPull, WATER ? 18 + 70*INT : 0); gl.uniform1f(u.whirl, WATER ? 120 + 320*INT : 0); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
     // ---- solve
     u=this.use('curl',this.crl); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('vort',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uCurl,this.crl.bind(1));
     gl.uniform1f(u.curl, Signal.user.noSwirl ? 0 : 3 + 3*a.high); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
-    u=this.use('div',this.div); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
+    u=this.use('div',this.div); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1f(u.walls, WATER?1:0); this.draw();
     u=this.use('clear',this.prs.w); gl.uniform1i(u.uTexture,this.prs.r.bind(0)); gl.uniform1f(u.value,0.8); this.draw(); this.prs.swap();
     for (let i=0;i<14;i++) { u=this.use('press',this.prs.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uDivergence,this.div.bind(0)); gl.uniform1i(u.uPressure,this.prs.r.bind(1)); this.draw(); this.prs.swap(); }
-    u=this.use('grad',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uPressure,this.prs.r.bind(0)); gl.uniform1i(u.uVelocity,this.vel.r.bind(1)); this.draw(); this.vel.swap();
+    u=this.use('grad',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uPressure,this.prs.r.bind(0)); gl.uniform1i(u.uVelocity,this.vel.r.bind(1)); gl.uniform1f(u.walls, WATER?1:0); this.draw(); this.vel.swap();
     u=this.use('advect',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uSource,this.vel.r.bind(0));
-    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation,0.35); gl.uniform1f(u.cap,0); this.draw(); this.vel.swap();
+    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, WATER?0.6:0.35); gl.uniform1f(u.cap,0); gl.uniform1f(u.drainK,0); this.draw(); this.vel.swap();
     u=this.use('advect',this.dye.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uSource,this.dye.r.bind(1));
-    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.13 + bpm/1200); gl.uniform1f(u.cap,1.6); this.draw(); this.dye.swap();
+    gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, WATER ? 0.04 : 0.13 + bpm/1200); gl.uniform1f(u.cap, WATER?1.3:1.6);
+    gl.uniform2f(u.drainPos,cx,cy); gl.uniform1f(u.aspect,this.aspect); gl.uniform1f(u.drainK, WATER ? 2.5 + 9*INT : 0); this.draw(); this.dye.swap();
     if (!debugEl.hidden) { this.measure(); this.measureCharge(); }
     // ---- show
     u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1i(u.uCharge,this.chg.r.bind(1)); gl.uniform1f(u.bright,1.0);
-    gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform1f(u.bolt, 0.6 + 0.8*(this.strikeStr||0));
+    gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform1f(u.bolt, 0.6 + 0.8*(this.strikeStr||0)); gl.uniform1f(u.water, WATER?1:0);
     gl.uniform1f(u.time, now/1000); gl.uniform1f(u.aspect, this.aspect);
     gl.uniform2f(u.orbPos, cx - m.ax*0.03, cy - m.ay*0.03);                         // a hair of lag so it feels held, not painted on
     gl.uniform1f(u.orbSize, 0.040 + 0.020*a.bass + 0.012*a.level);
@@ -639,6 +693,7 @@ const hsl = (h,s,l,a=1) => `hsla(${h},${s}%,${l}%,${a})`;
 const rings = [], sparks = [];
 const Scenes = [
   { name:'Smoke', gl:true },
+  { name:'Water', gl:true, water:true },
   { name:'Feel', draw(ctx, W, H, dt) {
       const a = Signal.audio, m = Signal.motion;
       // fast fade so pulses are snappy; faster at higher tempo
@@ -754,8 +809,8 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  charge ${Fluid.meanCharge==null?'-':Fluid.meanCharge.toFixed(4)}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.86  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
-    `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
+    `v0.90  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `intensity ${(Fluid.intensity||0).toFixed(2)}  meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
     `mic ${Audio.settings ? ('ns='+Audio.settings.noiseSuppression+' agc='+Audio.settings.autoGainControl+' ec='+Audio.settings.echoCancellation) : '?'}`;
