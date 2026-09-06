@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.61</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.62</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -380,6 +380,9 @@ const Fluid = {
     // ---- music -> gas
     const fifths = k => ((k*7)%12)*30, warm=(0.5-a.centroid)*50;
     const cx = 0.5 + m.tiltX*0.06, cy = 0.5 - m.tiltY*0.06;
+    const EMIT_PERIOD = 2000;                                              // ms per full clockwise turn
+    const ang = -(now / EMIT_PERIOD) * Math.PI * 2, ex = Math.cos(ang), ey = Math.sin(ang);
+    const along = (d) => [cx + ex*d/this.aspect, cy + ey*d];               // point d out from center along the beam
     if (a.beat && !Signal.user.noHits) {
       const L = Math.pow(a.hitLoud, 1.6);                              // steep: quiet hits tiny, loud hits huge
       const blast = a.hitLoud > 0.7 && a.onset > 0.45;
@@ -391,8 +394,10 @@ const Fluid = {
       const light = blast ? 0.34 : 0.22 + 0.10*L;
       const [r,g,b] = hsl2rgb(h, sat, light);
       const amt = (0.25 + 2.4*L) * (blast ? 1.3 : 1) * (0.6 + 0.4*a.onset);
-      this.splat(cx,cy, r*amt,g*amt,b*amt, 0.0008 + 0.009*L, 40 + 420*L);
-      if (a.hitLoud > 0.6) this.splat(cx,cy, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
+      const [kx,ky] = along(0.02 + 0.04*L);
+      this.splat(kx,ky, r*amt,g*amt,b*amt, 0.0008 + 0.009*L, 20 + 160*L);
+      this.push(kx,ky, ex*(150 + 500*L), ey*(150 + 500*L), 0.0015 + 0.004*L);              // shove it outward along the beam
+      if (a.hitLoud > 0.6) this.splat(kx,ky, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
       const n = blast ? 3 : (L > 0.3 ? 1 : 0);                        // off-center puffs for texture, in opposite pairs (zero net momentum)
       for (let i=0;i<n;i++) { const t=Math.random()*Math.PI*2, d=0.03+0.05*Math.random(), sp=300*L*(0.5+a.onset);
         this.push(cx+Math.cos(t)*d/this.aspect, cy+Math.sin(t)*d,  Math.cos(t)*sp,  Math.sin(t)*sp, 0.0015);
@@ -404,17 +409,19 @@ const Fluid = {
       const dim    = [225, 260, 155, 240, 210, 275, 145, 250];           // blues, purples, dark greens
       const hi = a.noteOct > 0.45;
       const h = (hi ? bright : dim)[a.notePc % 8];
-      const ang = a.notePc * Math.PI/6 + Math.PI/2, dist = 0.10 + 0.12*a.noteOct;
-      const px = cx + Math.cos(ang)*dist/this.aspect, py = cy + Math.sin(ang)*dist;
+      const [px,py] = along(0.03 + 0.05*a.noteOct);
       const [r,g,b] = hsl2rgb(h, 0.95, hi ? 0.55 + 0.25*a.noteOct : 0.25 + 0.2*a.noteOct);
       const NL = Math.pow(a.noteLoud, 1.6);
       const amt = 0.12 + 1.6*NL * (0.7 + 0.3*a.noteStrength);
-      this.splat(px, py, r*amt, g*amt, b*amt, 0.0003 + 0.0035*NL, 20 + 220*NL);
+      this.splat(px, py, r*amt, g*amt, b*amt, 0.0003 + 0.0035*NL, 10 + 60*NL);
+      this.push(px, py, ex*(120 + 420*NL), ey*(120 + 420*NL), 0.0008 + 0.002*NL);
     }
     if (a.bass > 0.08) {                                              // sustained bass: a steady dark plume, not puffs
       const bb = a.bass*a.bass;
       const [r,g,b] = hsl2rgb(250 + 30*Math.sin(now/4000), 0.85, 0.26); const amt = 0.10*bb;
-      this.splat(cx,cy, r*amt,g*amt,b*amt, 0.0012 + 0.002*bb, 4 + 30*bb);
+      const [bx,by] = along(0.02);
+      this.splat(bx,by, r*amt,g*amt,b*amt, 0.0012 + 0.002*bb, 0);
+      this.push(bx,by, ex*(30 + 120*bb), ey*(30 + 120*bb), 0.0012);
     }
     if (!Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
       const [r,g,b] = hsl2rgb((this.lastHue+180)%360, 0.5, 0.75);
@@ -600,7 +607,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.61  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.62  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
