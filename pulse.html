@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.70</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.71</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -322,7 +322,7 @@ const Fluid = {
           vec2 q=vUv-.5; q.x*=aspect; vec2 sw=vec2(-q.y,q.x)*stir;
           v+=(force+buoy*min(d,1.5)+sw)*dt; gl_FragColor=vec4(v,0.,1.); }`,
       div: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).x,R=texture2D(uVelocity,vR).x,T=texture2D(uVelocity,vT).y,B=texture2D(uVelocity,vB).y;
-        vec2 C=texture2D(uVelocity,vUv).xy; if(vL.x<0.)L=-C.x; if(vR.x>1.)R=-C.x; if(vT.y>1.)T=-C.y; if(vB.y<0.)B=-C.y; gl_FragColor=vec4(.5*(R-L+T-B),0.,0.,1.); }`,
+        gl_FragColor=vec4(.5*(R-L+T-B),0.,0.,1.); }`,
       curl: H+`uniform sampler2D uVelocity; void main(){ float L=texture2D(uVelocity,vL).y,R=texture2D(uVelocity,vR).y,T=texture2D(uVelocity,vT).x,B=texture2D(uVelocity,vB).x; gl_FragColor=vec4(.5*(R-L-T+B),0.,0.,1.); }`,
       vort: H+`uniform sampler2D uVelocity,uCurl; uniform float curl,dt;
         void main(){ float L=texture2D(uCurl,vL).x,R=texture2D(uCurl,vR).x,T=texture2D(uCurl,vT).x,B=texture2D(uCurl,vB).x,C=texture2D(uCurl,vUv).x;
@@ -332,9 +332,7 @@ const Fluid = {
       press: H+`uniform sampler2D uPressure,uDivergence; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
         float d=texture2D(uDivergence,vUv).x; gl_FragColor=vec4((L+R+B+T-d)*.25,0.,0.,1.); }`,
       grad: H+`uniform sampler2D uPressure,uVelocity; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
-        vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B);
-        float wall=smoothstep(0.,.05,vUv.x)*smoothstep(0.,.05,1.-vUv.x)*smoothstep(0.,.03,vUv.y)*smoothstep(0.,.03,1.-vUv.y);
-        gl_FragColor=vec4(v*wall,0.,1.); }`,
+        vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B); gl_FragColor=vec4(v,0.,1.); }`,
       clear: H+`uniform sampler2D uTexture; uniform float value; void main(){ gl_FragColor=value*texture2D(uTexture,vUv); }`,
       show: H+`uniform sampler2D uTexture; uniform float bright; void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
         c=max(c,0.); float mx=max(c.r,max(c.g,c.b)); float k=mx/(1.+mx*.6); c*=k/max(mx,1e-4);
@@ -632,7 +630,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.70  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.71  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
