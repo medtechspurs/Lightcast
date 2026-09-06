@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.62</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.70</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -83,7 +83,7 @@
 const Signal = {
   audio:  { level:0, bass:0, mid:0, high:0, beat:false, beatAge:9, bpm:0, beats:0,
             onset:0, centroid:0.5, chroma:new Float32Array(12), key:0, key2:0, keyStrength:0,
-            note:false, noteStrength:0, notePc:0, noteOct:0, notes:0, noteLoud:0, hitLoud:0 },
+            note:false, noteStrength:0, notePc:0, noteOct:0, notes:0, noteLoud:0, hitLoud:0, noteBand:6, bands:new Float32Array(12) },
   motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1, rz:0, events:0 },
   gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
   user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1, noHits:false, noSparks:false, noSwirl:false },
@@ -112,6 +112,9 @@ const Audio = {
     const hz = this.ctx.sampleRate / this.analyser.fftSize, b = f => Math.max(1, Math.round(f/hz));
     this.bins = { bass:[b(35), b(250)], mid:[b(250), b(2000)], high:[b(2000), b(8000)], flux:[b(30), b(5000)], lowCut:b(300), chroma:[b(60), b(2500)], note:[b(250), b(5000)] };
     this.hz = hz;
+    // 12 log-spaced bands, 40 Hz .. 8 kHz  (band 0 = deepest, 11 = highest) — the clock-face spokes
+    this.bandEdges = []; for (let k=0;k<=12;k++) this.bandEdges.push(b(40 * Math.pow(200, k/12)));
+    this.bandFloor = new Float32Array(12).fill(-85); this.bandCeil = new Float32Array(12).fill(-45);
     this.pc = new Int8Array(n); for (let i=1;i<n;i++) this.pc[i] = ((Math.round(69 + 12*Math.log2(i*hz/440)) % 12) + 12) % 12;
     try { const tr = stream.getAudioTracks()[0].getSettings(); this.settings = tr; } catch {}
   },
@@ -161,6 +164,16 @@ const Audio = {
       if (d > 0) { f += d * (i < B.lowCut ? 3 : 1);
         if (i >= B.note[0]) { nf += d; if (d > nbest) { nbest = d; nbin = i; } } }
     }
+    // --- per-band levels on their own adaptive windows
+    for (let k=0;k<12;k++) {
+      const d = this.meanDb(this.bandEdges[k], Math.max(this.bandEdges[k]+1, this.bandEdges[k+1]));
+      if (!isFinite(d)) continue;
+      this.bandFloor[k] += (d - this.bandFloor[k]) * (d < this.bandFloor[k] ? 0.05 : 0.002);
+      this.bandCeil[k]  += (d - this.bandCeil[k])  * (d > this.bandCeil[k]  ? 0.30 : 0.004);
+      if (this.bandCeil[k] < this.bandFloor[k] + 14) this.bandCeil[k] = this.bandFloor[k] + 14;
+      const v = Math.min(1, Math.max(0, (d - this.bandFloor[k]) / (this.bandCeil[k] - this.bandFloor[k])));
+      a.bands[k] += (v - a.bands[k]) * 0.35;
+    }
     // --- absolute loudness of the loudest note-band bin, on its own adaptive window
     let nMaxDb = -100; for (let i=B.note[0]; i<B.note[1]; i++) if (this.db[i] > nMaxDb) nMaxDb = this.db[i];
     if (isFinite(nMaxDb)) {
@@ -184,6 +197,8 @@ const Audio = {
       a.noteLoud = Math.min(1, Math.max(0, (ld - this.nFloor) / (this.nCeil - this.nFloor)));
       const midi = 69 + 12*Math.log2(Math.max(1, this.nbin[1]) * this.hz / 440);
       a.notePc = ((Math.round(midi) % 12) + 12) % 12; a.noteOct = Math.min(1, Math.max(0, (midi - 45) / 48));
+      const fq = Math.max(1, this.nbin[1]) * this.hz;
+      a.noteBand = Math.min(11, Math.max(1, Math.round(12 * Math.log(fq/40) / Math.log(200))));
     }
     this.flux.push(f); this.fluxT.push(now);
     while (this.fluxT.length && now - this.fluxT[0] > 1200) { this.flux.shift(); this.fluxT.shift(); }
@@ -380,9 +395,13 @@ const Fluid = {
     // ---- music -> gas
     const fifths = k => ((k*7)%12)*30, warm=(0.5-a.centroid)*50;
     const cx = 0.5 + m.tiltX*0.06, cy = 0.5 - m.tiltY*0.06;
-    const EMIT_PERIOD = 2000;                                              // ms per full clockwise turn
-    const ang = -(now / EMIT_PERIOD) * Math.PI * 2, ex = Math.cos(ang), ey = Math.sin(ang);
-    const along = (d) => [cx + ex*d/this.aspect, cy + ey*d];               // point d out from center along the beam
+    const EMIT_PERIOD = 2000;                                              // ms per full clockwise turn of the wheel
+    const base = Math.PI/2 - (now / EMIT_PERIOD) * Math.PI * 2;            // spoke 0 starts at 12 o'clock
+    const spoke = k => { const t = base - k*Math.PI/6; return [Math.cos(t), Math.sin(t)]; };
+    const at = (k, d) => { const [x,y] = spoke(k); return [cx + x*d/this.aspect, cy + y*d, x, y]; };
+    // dial colors: dark blue at 12 -> purples/greens -> bright yellow & pink by 11
+    const DIAL = [[235,.22],[262,.24],[150,.24],[285,.28],[210,.34],[185,.40],[160,.46],[120,.50],[90,.55],[55,.60],[330,.62],[45,.68]];
+    const dial = (k, boost=0) => hsl2rgb(DIAL[k][0], 0.92, Math.min(0.8, DIAL[k][1] + boost));
     if (a.beat && !Signal.user.noHits) {
       const L = Math.pow(a.hitLoud, 1.6);                              // steep: quiet hits tiny, loud hits huge
       const blast = a.hitLoud > 0.7 && a.onset > 0.45;
@@ -394,9 +413,9 @@ const Fluid = {
       const light = blast ? 0.34 : 0.22 + 0.10*L;
       const [r,g,b] = hsl2rgb(h, sat, light);
       const amt = (0.25 + 2.4*L) * (blast ? 1.3 : 1) * (0.6 + 0.4*a.onset);
-      const [kx,ky] = along(0.02 + 0.04*L);
+      const [kx,ky,ex,ey] = at(0, 0.02 + 0.04*L);
       this.splat(kx,ky, r*amt,g*amt,b*amt, 0.0008 + 0.009*L, 20 + 160*L);
-      this.push(kx,ky, ex*(150 + 500*L), ey*(150 + 500*L), 0.0015 + 0.004*L);              // shove it outward along the beam
+      this.push(kx,ky, ex*(150 + 500*L), ey*(150 + 500*L), 0.0015 + 0.004*L);              // shove it outward along the spoke
       if (a.hitLoud > 0.6) this.splat(kx,ky, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
       const n = blast ? 3 : (L > 0.3 ? 1 : 0);                        // off-center puffs for texture, in opposite pairs (zero net momentum)
       for (let i=0;i<n;i++) { const t=Math.random()*Math.PI*2, d=0.03+0.05*Math.random(), sp=300*L*(0.5+a.onset);
@@ -405,13 +424,9 @@ const Fluid = {
       this.lastHue = h;
     }
     if (a.note && !Signal.user.noHits) {                                // every pluck / note is its own puff
-      const bright = [55, 330, 120, 180, 40, 300, 95, 165];             // yellow, pink, green, cyan ...
-      const dim    = [225, 260, 155, 240, 210, 275, 145, 250];           // blues, purples, dark greens
-      const hi = a.noteOct > 0.45;
-      const h = (hi ? bright : dim)[a.notePc % 8];
-      const [px,py] = along(0.03 + 0.05*a.noteOct);
-      const [r,g,b] = hsl2rgb(h, 0.95, hi ? 0.55 + 0.25*a.noteOct : 0.25 + 0.2*a.noteOct);
       const NL = Math.pow(a.noteLoud, 1.6);
+      const [px,py,ex,ey] = at(a.noteBand, 0.03 + 0.04*NL);
+      const [r,g,b] = dial(a.noteBand, 0.12*NL);
       const amt = 0.12 + 1.6*NL * (0.7 + 0.3*a.noteStrength);
       this.splat(px, py, r*amt, g*amt, b*amt, 0.0003 + 0.0035*NL, 10 + 60*NL);
       this.push(px, py, ex*(120 + 420*NL), ey*(120 + 420*NL), 0.0008 + 0.002*NL);
@@ -419,13 +434,22 @@ const Fluid = {
     if (a.bass > 0.08) {                                              // sustained bass: a steady dark plume, not puffs
       const bb = a.bass*a.bass;
       const [r,g,b] = hsl2rgb(250 + 30*Math.sin(now/4000), 0.85, 0.26); const amt = 0.10*bb;
-      const [bx,by] = along(0.02);
+      const [bx,by,ex,ey] = at(0, 0.02);
       this.splat(bx,by, r*amt,g*amt,b*amt, 0.0012 + 0.002*bb, 0);
       this.push(bx,by, ex*(30 + 120*bb), ey*(30 + 120*bb), 0.0012);
     }
+    for (let k=1;k<12;k++) {                                            // each spoke breathes with its band
+      const v = a.bands[k]; if (v < 0.18) continue;
+      const vv = (v-0.18)/0.82, amt = 0.045*vv*vv;
+      const [sx,sy,ex,ey] = at(k, 0.025);
+      const [r,g,b] = dial(k);
+      this.splat(sx,sy, r*amt,g*amt,b*amt, 0.0006 + 0.0008*vv, 0);
+      if (vv > 0.5) this.push(sx,sy, ex*90*vv, ey*90*vv, 0.0008);
+    }
     if (!Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
-      const [r,g,b] = hsl2rgb((this.lastHue+180)%360, 0.5, 0.75);
-      this.splat(0.2+Math.random()*0.6, 0.2+Math.random()*0.6, r*0.35,g*0.35,b*0.35, 0.0003, 60);
+      const [r,g,b] = dial(11, 0.1);
+      const [sx,sy,ex,ey] = at(11, 0.05 + 0.08*Math.random());
+      this.splat(sx,sy, r*0.35,g*0.35,b*0.35, 0.0003, 40);
     }
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
@@ -603,11 +627,12 @@ function frame(now) {
   Bridge.update(now);
   if (!debugEl.hidden) debugEl.textContent =
     `bass ${Signal.audio.bass.toFixed(2)}  lvl ${Signal.audio.level.toFixed(2)}\n` +
-    `beats ${Signal.audio.beats}  notes ${Signal.audio.notes}  bpm ${Signal.audio.bpm}\n` +
+    `beats ${Signal.audio.beats}  notes ${Signal.audio.notes}  lastSpoke ${Signal.audio.noteBand}  bpm ${Signal.audio.bpm}\n` +
+    `bands ${Array.from(Signal.audio.bands).map(v=>Math.round(v*9)).join('')}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.62  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.70  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
