@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.71</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.72</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -334,9 +334,23 @@ const Fluid = {
       grad: H+`uniform sampler2D uPressure,uVelocity; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
         vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B); gl_FragColor=vec4(v,0.,1.); }`,
       clear: H+`uniform sampler2D uTexture; uniform float value; void main(){ gl_FragColor=value*texture2D(uTexture,vUv); }`,
-      show: H+`uniform sampler2D uTexture; uniform float bright; void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
+      show: H+`uniform sampler2D uTexture; uniform float bright,time,orbSize,orbGlow,aspect; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
+        void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
         c=max(c,0.); float mx=max(c.r,max(c.g,c.b)); float k=mx/(1.+mx*.6); c*=k/max(mx,1e-4);
-        gl_FragColor=vec4(pow(c*bright*vg,vec3(1./1.15)),1.); }`
+        c=pow(c*bright*vg,vec3(1./1.15));
+        // --- the orb: a small churning sphere of light at the source
+        vec2 o=vUv-orbPos; o.x*=aspect; float d=length(o)/orbSize; float ang=atan(o.y,o.x);
+        float sw1=sin(ang*3.+time*2.1-d*7.)*.5+.5;
+        float sw2=sin(ang*5.-time*3.3+d*11.)*.5+.5;
+        float sw3=sin(ang*2.-time*1.3+d*4.)*.5+.5;
+        vec3 col=mix(mix(orbA,orbB,sw1),orbC,sw3*.6)*(.55+.45*sw2);
+        float core=exp(-d*d*2.4);
+        float halo=exp(-d*1.1)*.30;
+        float scint=pow(max(0.,sin(ang*19.+time*9.)*sin(d*23.-time*7.5)),10.)*exp(-d*.8);
+        float rim=smoothstep(.2,0.,abs(d-1.))*.25;
+        vec3 orb=col*core*1.5+col*halo+vec3(1.)*core*core*.7+vec3(1.)*scint*.6+col*rim;
+        c+=orb*orbGlow*bright;
+        gl_FragColor=vec4(c,1.); }`
     };
     const mk = (t,src) => { const sh=gl.createShader(t); gl.shaderSource(sh,src); gl.compileShader(sh); if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(sh); return sh; };
     const vs = mk(gl.VERTEX_SHADER, V);
@@ -468,7 +482,14 @@ const Fluid = {
     gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.13 + bpm/1200); gl.uniform1f(u.cap,1.6); this.draw(); this.dye.swap();
     if (!debugEl.hidden) this.measure();
     // ---- show
-    u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1f(u.bright,1.0); this.draw();
+    u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1f(u.bright,1.0);
+    gl.uniform1f(u.time, now/1000); gl.uniform1f(u.aspect, this.aspect);
+    gl.uniform2f(u.orbPos, cx - m.ax*0.03, cy - m.ay*0.03);                         // a hair of lag so it feels held, not painted on
+    gl.uniform1f(u.orbSize, 0.040 + 0.020*a.bass + 0.012*a.level);
+    gl.uniform1f(u.orbGlow, 0.75 + 0.35*a.level);
+    const oa = dial(a.key % 12, 0.3), ob = dial((a.noteBand+6) % 12, 0.25), oc = dial(11, 0.1);
+    gl.uniform3f(u.orbA, ...oa); gl.uniform3f(u.orbB, ...ob); gl.uniform3f(u.orbC, ...oc);
+    this.draw();
   }
 };
 Fluid.measure = function() {
@@ -630,7 +651,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.71  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.72  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
