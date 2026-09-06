@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 1.22</p>
+  <p class="fine" style="margin:0 0 20px">Version 1.23</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -62,7 +62,7 @@
   <div class="row"><span>Physics</span><div class="seg" id="physics"></div></div>
   <div class="row"><span>Test</span><div class="seg"><button id="tHits">Hits on</button><button id="tSparks">Sparks on</button><button id="tSwirl">Swirl on</button><button id="tStrike">Strike</button></div></div>
   <div class="row"><span>Bright</span><input type="range" id="bright" min="0.15" max="1" step="0.01" value="0.8"></div>
-  <div class="row"><span>Feel</span><input type="range" id="sens" min="0.5" max="2" step="0.05" value="1"></div>
+  <div class="row"><span>Feel</span><input type="range" id="sens" min="0.5" max="3" step="0.05" value="1.4"></div>
   <div class="row"><span></span><div class="seg"><button id="dbg">Show levels</button></div></div>
 </div>
 <div id="debug" hidden></div>
@@ -89,7 +89,7 @@ const Signal = {
             note:false, noteStrength:0, notePc:0, noteOct:0, notes:0, noteLoud:0, hitLoud:0, noteBand:6, bands:new Float32Array(12), gate:0 },
   motion: { tiltX:0, tiltY:0, energy:0, shake:false, spin:0, available:false, ax:0, ay:0, gx:0, gy:1, rz:0, events:0, flick:false, flickStrength:0, flicks:0 },
   gesture:{ available:false, hands:0, open:0 },   // layer 2 fills this
-  user:   { bright:0.8, sens:1, palette:0, scene:0, physics:1, noHits:false, noSparks:false, noSwirl:false },
+  user:   { bright:0.8, sens:1.4, palette:0, scene:0, physics:1, noHits:false, noSparks:false, noSwirl:false },
   t:0
 };
 
@@ -140,7 +140,7 @@ const Audio = {
     // --- silence gate: nothing counts unless it is clearly above the quietest the room has been
     let overall = -120; for (let i=B.flux[0]; i<B.flux[1]; i++) if (this.db[i] > overall) overall = this.db[i];   // loudest bin
     if (isFinite(overall) && overall > -119) { this.quietDb += (overall - this.quietDb) * (overall < this.quietDb ? 0.02 : 0.0008); }
-    a.gate = Math.min(1, Math.max(0, (overall - this.quietDb - 7) / 10));
+    a.gate = Math.min(1, Math.max(0, (overall - this.quietDb - 4) / (9/sens)));
     const norm = d => Math.min(1, Math.max(0, (d - this.floorDb) / 50));
     a.mid = norm(this.meanDb(...B.mid)); a.high = norm(this.meanDb(...B.high));
     a.level = (a.bass + a.mid + a.high)/3;
@@ -194,10 +194,10 @@ const Audio = {
     while (this.nfluxT.length && now - this.nfluxT[0] > 1000) { this.nflux.shift(); this.nfluxT.shift(); }
     let nm=0; for (const v of this.nflux) nm += v; nm /= this.nflux.length || 1;
     let nv=0; for (const v of this.nflux) nv += (v-nm)*(v-nm); const nsd = Math.sqrt(nv/(this.nflux.length||1));
-    const nthr = nm + (0.9/sens) * nsd + 0.03;
+    const nthr = nm + (0.7/sens) * nsd + 0.008;
     this.np = [this.np[1], this.np[2], nf]; this.nbin = [this.nbin[1], this.nbin[2], nbin];
     a.note = false;
-    if (a.gate > 0.35 && this.np[1] > nthr && this.np[1] >= this.np[0] && this.np[1] > this.np[2] && now - this.lastNote > 65) {
+    if (a.gate > 0.25 && this.np[1] > nthr && this.np[1] >= this.np[0] && this.np[1] > this.np[2] && now - this.lastNote > 65) {
       a.note = true; a.notes++; this.lastNote = now; Audio.lastNote = now;
       a.noteStrength = Math.min(1, (this.np[1] - nm) / (2.5*nsd + 0.03));
       const ld = Math.max(this.nMax[1], this.nMax[2]);                 // level at/just after the onset
@@ -211,13 +211,13 @@ const Audio = {
     while (this.fluxT.length && now - this.fluxT[0] > 1200) { this.flux.shift(); this.fluxT.shift(); }
     let m=0; for (const v of this.flux) m += v; m /= this.flux.length || 1;
     let vr=0; for (const v of this.flux) vr += (v-m)*(v-m); const sd = Math.sqrt(vr/(this.flux.length||1));
-    const thr = m + (1.2/sens) * sd + 0.02;
+    const thr = m + (0.85/sens) * sd + 0.006;
 
     // local peak pick with one-frame delay: fp = [two ago, one ago, now]
     this.fp = [this.fp[1], this.fp[2], f];
     a.beat = false;
     const [p2,p1,p0] = this.fp;
-    if (a.gate > 0.35 && p1 > thr && p1 >= p2 && p1 > p0 && now - this.lastBeat > 120) {
+    if (a.gate > 0.25 && p1 > thr && p1 >= p2 && p1 > p0 && now - this.lastBeat > 90) {
       a.beat = true; a.beats++; this.lastBeat = now;
       a.onset = Math.min(1, (p1 - m) / (3*sd + 0.05));     // how sudden the hit was, 0..1
       a.hitLoud = Math.max(this.bassN[1], this.bassN[2]);   // how loud it was, 0..1
@@ -594,7 +594,7 @@ const Fluid = {
     const DIAL = [[235,.22],[262,.24],[150,.24],[285,.28],[210,.34],[185,.40],[160,.46],[120,.50],[90,.55],[55,.60],[330,.62],[45,.68]];
     const dial = (k, boost=0) => LIQUID ? hsl2rgb(170 + k*5, 0.75, 0.50 + boost*0.4) : hsl2rgb(DIAL[k][0], 0.92, Math.min(0.8, DIAL[k][1] + boost));
     if (a.beat && !Signal.user.noHits) {
-      const L = Math.pow(a.hitLoud, 1.6);                              // steep: quiet hits tiny, loud hits huge
+      const L = Math.pow(Math.min(1, a.hitLoud * (0.7 + 0.5*Signal.user.sens)), 1.25);   // quiet hits small, loud hits huge; Feel slider lifts quiet sources
       const blast = a.hitLoud > 0.7 && a.onset > 0.45;
       // low hits live in the dark end: deep blue / purple / dark green, chosen by the harmony
       const darkPal = [230, 265, 150, 285, 215, 140];
@@ -603,7 +603,7 @@ const Fluid = {
       const sat = 0.9;
       const light = blast ? 0.34 : 0.22 + 0.10*L;
       const [r,g,b] = LIQUID ? dial(0, 0.2 + 0.3*L) : hsl2rgb(h, sat, light);
-      const amt = (0.25 + 2.4*L) * (blast ? 1.3 : 1) * (0.6 + 0.4*a.onset);
+      const amt = (0.45 + 2.2*L) * (blast ? 1.3 : 1) * (0.6 + 0.4*a.onset);
       const [kx,ky,ex,ey] = at(0, 0.02 + 0.04*L);
       this.remember(kx + ex*0.08/this.aspect, ky + ey*0.08, 0);
       if (WATER) { this.jets.push({ k:0, until: now + 120 + 220*L, amt: 0.12 + 0.25*L, w: 0.0004 + 0.0012*L, v: 200 + 300*L, col: dial(0, L) }); }
@@ -619,11 +619,11 @@ const Fluid = {
       this.lastHue = h;
     }
     if (a.note && !Signal.user.noHits) {                                // every pluck / note is its own puff
-      const NL = Math.pow(a.noteLoud, 1.6);
+      const NL = Math.pow(Math.min(1, a.noteLoud * (0.7 + 0.5*Signal.user.sens)), 1.25);
       const [px,py,ex,ey] = at(a.noteBand, 0.03 + 0.04*NL);
       this.remember(px + ex*0.09/this.aspect, py + ey*0.09, a.noteBand);
       const [r,g,b] = dial(a.noteBand, 0.12*NL);
-      const amt = 0.12 + 1.6*NL * (0.7 + 0.3*a.noteStrength);
+      const amt = 0.22 + 1.5*NL * (0.7 + 0.3*a.noteStrength);
       if (LIQUID) this.bump(px,py, 2.5 + 9*NL, 0.0005 + 0.0015*NL);
       if (WATER) { this.jets.push({ k:a.noteBand, until: now + 90 + 200*NL, amt: 0.07 + 0.20*NL, w: 0.0003 + 0.0008*NL, v: 180 + 280*NL, col: [r,g,b] }); }
       else {
@@ -942,7 +942,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  charge ${Fluid.meanCharge==null?'-':Fluid.meanCharge.toFixed(4)}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v1.22  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v1.23  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `culprit ${Fluid.traceWho||'-'}  jump ${(Fluid.traceMax||0).toFixed(0)}\n` +
     `intensity ${(Fluid.intensity||0).toFixed(2)}  meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
