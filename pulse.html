@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.90</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.91</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -398,13 +398,15 @@ const Fluid = {
             }
           }
           gl_FragColor=vec4(q,tip,dir,1.0); }`,
-      froth: H+`uniform sampler2D uFroth,uVelocity,uDye,uCurl; uniform vec2 velTexel; uniform float dt,decay,gen;
-        void main(){ vec2 vel=texture2D(uVelocity,vUv).xy; vec2 c=vUv-dt*vel*velTexel; vec2 f=texture2D(uFroth,c).xy*decay;
-          vec3 dye=texture2D(uDye,vUv).rgb; float d=max(dye.r,max(dye.g,dye.b));
+      froth: H+`uniform sampler2D uFroth,uVelocity,uDye,uCurl; uniform vec2 velTexel; uniform float dt,decay,gen,time;
+        float hash(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
+        void main(){ vec2 vel=texture2D(uVelocity,vUv).xy; vec2 c=vUv-dt*vel*velTexel; vec3 f=texture2D(uFroth,c).xyz; f.xy*=decay;
+          vec3 dye=texture2D(uDye,vUv).rgb; float d=max(dye.r,max(dye.g,dye.b)); float wet=smoothstep(.06,.2,d);
           float sp=length(vel)/260.; float cu=abs(texture2D(uCurl,vUv).x)/60.;
-          float g=(smoothstep(.5,1.1,sp)+smoothstep(.6,1.2,cu))*smoothstep(.04,.15,d)*gen;
-          float viol=smoothstep(1.0,2.0,sp+cu)*smoothstep(.04,.15,d);
-          gl_FragColor=vec4(max(f.x,min(1.,g)),max(f.y,viol),0.,1.); }`,
+          float g=(smoothstep(1.0,1.8,sp)+smoothstep(1.2,2.2,cu))*wet*gen;                 // foam only where it really rushes
+          float viol=smoothstep(2.4,3.6,sp+cu)*wet;                                          // colored caps: rarer still
+          float hue=f.z; if(viol>f.y+.05){ hue=hash(floor(vUv*vec2(5.,9.))+floor(time*.7)); } // one color per cap, kept as it drifts
+          gl_FragColor=vec4(max(f.x,min(1.,g)),max(f.y,viol),hue,1.); }`,
       show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt,water; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
         float dens(vec2 p){ vec3 c=texture2D(uTexture,p).rgb; return max(c.r,max(c.g,c.b)); }
         vec3 hue2rgb(float h){ vec3 k=mod(vec3(5.,3.,1.)+h/60.,6.); return 1.-clamp(min(k,4.-k),0.,1.); }
@@ -418,10 +420,10 @@ const Fluid = {
           vec3 wc=mix(shallow,deep,depth)*mix(vec3(1.),tint,.4);
           float spec=pow(shade,22.)*.9;
           c=(wc*(.5+.7*shade)+vec3(spec))*depth;
-          vec2 fr=texture2D(uCharge,vUv).xy; float foam=smoothstep(.12,.6,fr.x);
-          float hh=fract(vUv.x*5.3+vUv.y*3.1+time*.15)*360.;
-          vec3 foamc=mix(vec3(1.),hue2rgb(hh),smoothstep(.25,.8,fr.y)*.85);
-          c=mix(c,foamc,foam*.92);
+          vec3 fr=texture2D(uCharge,vUv).xyz; float foam=smoothstep(.25,.75,fr.x);
+          vec3 capc=hue2rgb(fr.z*360.); capc=mix(capc,vec3(1.),.15);
+          vec3 foamc=mix(vec3(.92,.96,1.),capc,smoothstep(.35,.85,fr.y)*.9);
+          c=mix(c,foamc,foam*.85);
           vg=1.;
         }
         // --- lightning: one-cell tendrils, thin halo, no haze
@@ -584,7 +586,7 @@ const Fluid = {
     if (WATER) {                                                          // froth field rides the flow
       const u=this.use('froth',this.chg.w); gl.uniform2f(u.velTexel,this.vel.tx,this.vel.ty);
       gl.uniform1i(u.uFroth,this.chg.r.bind(0)); gl.uniform1i(u.uVelocity,this.vel.r.bind(1)); gl.uniform1i(u.uDye,this.dye.r.bind(2)); gl.uniform1i(u.uCurl,this.crl.bind(3));
-      gl.uniform1f(u.dt,dt); gl.uniform1f(u.decay,Math.exp(-dt*1.6)); gl.uniform1f(u.gen,1.0); this.draw(); this.chg.swap();
+      gl.uniform1f(u.dt,dt); gl.uniform1f(u.decay,Math.exp(-dt*1.8)); gl.uniform1f(u.gen,1.0); gl.uniform1f(u.time,now/1000); this.draw(); this.chg.swap();
     } else {
       const age = this.strikeT ? (now - this.strikeT) : 1e9, growing = age < 230 + 120*(this.strikeStr||0);
       const steps = growing ? 8 : 1;
@@ -809,7 +811,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  charge ${Fluid.meanCharge==null?'-':Fluid.meanCharge.toFixed(4)}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.90  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.91  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `intensity ${(Fluid.intensity||0).toFixed(2)}  meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
