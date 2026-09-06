@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 1.00</p>
+  <p class="fine" style="margin:0 0 20px">Version 1.10</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -412,24 +412,55 @@ const Fluid = {
         void main(){ vec2 vel=texture2D(uVelocity,vUv).xy; vec2 c=vUv-dt*vel*velTexel; vec4 f=texture2D(uFroth,c);
           float wallN=min(min(vUv.x,1.-vUv.x),min(vUv.y,1.-vUv.y)); float nearWall=1.-smoothstep(0.,.05,wallN);
           f.xy*=decay*mix(1.,.90,nearWall);                                                       // foam against a wall dies fast
-          float d=dens(vUv); float wet=smoothstep(.18,.40,d);                                     // real water only, not thin film
+          float d=dens(vUv); float wet=smoothstep(.10,.35,d);
           float spd=length(vel); vec2 vn=vel/(spd+1e-3);
           float ahead=dens(vUv+vn*texelSize*4.); float edge=smoothstep(0.,.2,d-ahead)*wet;      // leading edge: less water ahead
           float sp=spd/150.;
-          float dv=-texture2D(uDiv,vUv).x;                                                        // compression: hitting a wall or other water
-          float crash=smoothstep(60.,200.,dv)*smoothstep(.7,1.4,sp)*wet;                          // needs real speed too
-          float g=(smoothstep(.8,1.6,sp)*edge*1.3+crash)*gen;
-          float viol=smoothstep(1.8,2.8,sp)*edge*.9+smoothstep(220.,420.,dv)*wet;
+          float dv=-texture2D(uDiv,vUv).x;                                                        // compression: water hitting water
+          float crash=smoothstep(80.,240.,dv)*smoothstep(.8,1.5,sp)*wet;
+          float g=(smoothstep(.9,1.7,sp)*edge*1.3+crash)*gen;
+          float viol=smoothstep(2.0,3.0,sp)*edge*.9+smoothstep(260.,460.,dv)*wet;
           float hue=f.z, ph=f.w;
           if(g>f.x+.05){ ph=hash(vUv*91.+time); }
           if(viol>f.y+.05){ hue=hash(floor(vUv*vec2(5.,9.))+floor(time*.7)); }
           gl_FragColor=vec4(max(f.x,min(1.,g)),max(f.y,viol),hue,ph); }`,
-      show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt,water; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
+      show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt,water,liquid; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
         float dens(vec2 p){ vec3 c=texture2D(uTexture,p).rgb; return max(c.r,max(c.g,c.b)); }
         vec3 hue2rgb(float h){ vec3 k=mod(vec3(5.,3.,1.)+h/60.,6.); return 1.-clamp(min(k,4.-k),0.,1.); }
         float hash(vec2 p){ return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453); }
         void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
-        if(water>.5){
+        if(liquid>.5){
+          // --- luminous water: depth color, slope-lit surface, caustics, chromatic refraction, foam at fast edges
+          float d=max(c.r,max(c.g,c.b)); vec3 tint=c/max(d,1e-3);
+          vec2 gradv=vec2(dens(vR)-dens(vL), dens(vT)-dens(vB));
+          vec3 nrm=normalize(vec3(-gradv*9.,1.));
+          vec3 L1=normalize(vec3(-.45,.6,.65));
+          float shade=max(dot(nrm,L1),0.);
+          float spec=pow(shade,36.)*1.2;
+          // refraction: look through the surface with a slight chromatic split
+          vec2 rf=nrm.xy*.012;
+          vec3 cr=vec3(texture2D(uTexture,vUv+rf*1.15).r, texture2D(uTexture,vUv+rf).g, texture2D(uTexture,vUv+rf*.85).b);
+          float dr=max(cr.r,max(cr.g,cr.b)); vec3 tr=cr/max(dr,1e-3);
+          float depth=smoothstep(.02,.9,dr);
+          // caustics: two drifting interference patterns, bent by the surface
+          vec2 p=(vUv-.5)*vec2(aspect,1.)*22.+nrm.xy*3.;
+          float ca=abs(sin(p.x+time*1.1+sin(p.y*1.3+time*.7)));
+          float cb=abs(sin(p.y*1.1-time*.9+sin(p.x*1.7-time*.5)));
+          float caus=pow(ca*cb,3.)*smoothstep(.1,.7,dr);
+          vec3 deep=vec3(.02,.07,.20);
+          vec3 body=mix(deep,tr*vec3(.55,.9,1.),.65)*(.35+.75*dr);
+          vec3 col=body*(.45+.65*shade)+tr*caus*.9+vec3(.9,.97,1.)*spec;
+          float rim=smoothstep(.0,.6,length(gradv))*.35;                                           // fresnel-ish edge brightening
+          col+=tr*rim;
+          c=col*depth;
+          vec4 fr=texture2D(uCharge,vUv);
+          float n1=hash(floor(vUv*vec2(70.,150.))+fr.w*7.); float n2=hash(floor(vUv*vec2(170.,360.)+time*4.)+fr.w*13.);
+          float bub=smoothstep(.3,.8,.55*n1+.45*n2+fr.x*.4-.2);
+          float foam=smoothstep(.15,.6,fr.x)*bub*smoothstep(.12,.35,dr);
+          vec3 capc=mix(vec3(1.),hue2rgb(fr.z*360.),.5);
+          vec3 foamc=mix(vec3(.94,.98,1.),capc,smoothstep(.4,.85,fr.y));
+          c=mix(c,foamc,foam*.85);
+        } else if(water>.5){
           float d=max(c.r,max(c.g,c.b)); vec3 tint=c/max(d,1e-3);
           float depth=smoothstep(.15,.7,d);
           vec2 gradv=vec2(dens(vR)-dens(vL), dens(vT)-dens(vB));
@@ -448,7 +479,7 @@ const Fluid = {
           vg=1.;
         }
         // --- lightning: one-cell tendrils, thin halo, no haze
-        float ch=water>.5?0.:texture2D(uCharge,vUv).x;
+        float ch=(water>.5||liquid>.5)?0.:texture2D(uCharge,vUv).x;
         float g1=max(max(texture2D(uCharge,vL).x,texture2D(uCharge,vR).x),max(texture2D(uCharge,vT).x,texture2D(uCharge,vB).x));
         float line=smoothstep(.3,.7,ch), lhalo=smoothstep(.3,.7,g1)*.45;
         if(line+lhalo>.01){ float d=max(c.r,max(c.g,c.b)); float fl=.8+.2*sin(time*95.+vUv.y*50.);
@@ -522,8 +553,8 @@ const Fluid = {
   step(dt, now) {
     const gl=this.gl, a=Signal.audio, m=Signal.motion, bpm=a.bpm||120;
     dt = Math.min(0.033, Math.max(0.008, dt));
-    const WATER = !!Scenes[Signal.user.scene].water;
-    if (WATER !== this.wasWater) { this.wasWater = WATER; this.clearAll(); }
+    const WATER = false, LIQUID = !!Scenes[Signal.user.scene].liquid;
+    if (LIQUID !== this.wasLiquid) { this.wasLiquid = LIQUID; this.clearAll(); }
     this.intensity = (this.intensity||0) + ((Math.min(1, a.level*1.6 + 0.3*Math.exp(-a.beatAge*3) + 0.2*Math.exp(-((now-(Audio.lastNote||0))/1000)*4))) - (this.intensity||0)) * 0.05;
     const INT = this.intensity;
     const K = WATER ? 0.75 : 1;                                             // water injects a little less
@@ -536,7 +567,7 @@ const Fluid = {
     const at = (k, d) => { const [x,y] = spoke(k); return [cx + x*d/this.aspect, cy + y*d, x, y]; };
     // dial colors: dark blue at 12 -> purples/greens -> bright yellow & pink by 11
     const DIAL = [[235,.22],[262,.24],[150,.24],[285,.28],[210,.34],[185,.40],[160,.46],[120,.50],[90,.55],[55,.60],[330,.62],[45,.68]];
-    const dial = (k, boost=0) => WATER ? hsl2rgb(172 + k*4, 0.6, 0.48 + boost*0.5) : hsl2rgb(DIAL[k][0], 0.92, Math.min(0.8, DIAL[k][1] + boost));
+    const dial = (k, boost=0) => LIQUID ? hsl2rgb(170 + k*5, 0.75, 0.50 + boost*0.4) : hsl2rgb(DIAL[k][0], 0.92, Math.min(0.8, DIAL[k][1] + boost));
     if (a.beat && !Signal.user.noHits) {
       const L = Math.pow(a.hitLoud, 1.6);                              // steep: quiet hits tiny, loud hits huge
       const blast = a.hitLoud > 0.7 && a.onset > 0.45;
@@ -546,7 +577,7 @@ const Fluid = {
       if (blast) h = darkPal[(a.key2 + 3) % darkPal.length];          // a different dark so the blast stands out
       const sat = 0.9;
       const light = blast ? 0.34 : 0.22 + 0.10*L;
-      const [r,g,b] = hsl2rgb(h, sat, light);
+      const [r,g,b] = LIQUID ? dial(0, 0.2 + 0.3*L) : hsl2rgb(h, sat, light);
       const amt = (0.25 + 2.4*L) * (blast ? 1.3 : 1) * (0.6 + 0.4*a.onset);
       const [kx,ky,ex,ey] = at(0, 0.02 + 0.04*L);
       this.remember(kx + ex*0.08/this.aspect, ky + ey*0.08, 0);
@@ -554,7 +585,7 @@ const Fluid = {
       else {
       this.splat(kx,ky, r*amt,g*amt,b*amt, 0.0008 + 0.009*L, 20 + 160*L);
       this.push(kx,ky, ex*(150 + 500*L), ey*(150 + 500*L), 0.0015 + 0.004*L); }             // shove it outward along the spoke
-      if (!WATER && a.hitLoud > 0.6) this.splat(kx,ky, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
+      if (!WATER && !LIQUID && a.hitLoud > 0.6) this.splat(kx,ky, -1.2*L,-1.2*L,-1.2*L, 0.0004 + 0.003*L, 0);   // ink: a dark core on big hits
       const n = blast ? 3 : (L > 0.3 ? 1 : 0);                        // off-center puffs for texture, in opposite pairs (zero net momentum)
       for (let i=0;i<n;i++) { const t=Math.random()*Math.PI*2, d=0.03+0.05*Math.random(), sp=300*L*(0.5+a.onset);
         this.push(cx+Math.cos(t)*d/this.aspect, cy+Math.sin(t)*d,  Math.cos(t)*sp,  Math.sin(t)*sp, 0.0015);
@@ -579,7 +610,7 @@ const Fluid = {
     }
     if (a.bass > 0.08) {                                              // sustained bass: a steady dark plume, not puffs
       const bb = a.bass*a.bass;
-      const [r,g,b] = WATER ? dial(0, 0.1) : hsl2rgb(250 + 30*Math.sin(now/4000), 0.85, 0.26); const amt = 0.10*bb*K;
+      const [r,g,b] = (WATER||LIQUID) ? dial(0, 0.1) : hsl2rgb(250 + 30*Math.sin(now/4000), 0.85, 0.26); const amt = 0.10*bb*K;
       const [bx,by,ex,ey] = at(0, 0.02);
       this.splat(bx,by, r*amt,g*amt,b*amt, 0.0012 + 0.002*bb, 0);
       this.push(bx,by, ex*(30 + 120*bb), ey*(30 + 120*bb), 0.0012);
@@ -592,7 +623,7 @@ const Fluid = {
       this.splat(sx,sy, r*amt,g*amt,b*amt, 0.0006 + 0.0008*vv, 0);
       if (vv > 0.5) this.push(sx,sy, ex*90*vv, ey*90*vv, 0.0008);
     }
-    if (!WATER && !Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
+    if (!WATER && !LIQUID && !Signal.user.noSparks && a.high > 0.25 && Math.random() < a.high) {                    // sparks from the highs
       const [r,g,b] = dial(11, 0.1);
       const [sx,sy,ex,ey] = at(11, 0.05 + 0.08*Math.random());
       this.splat(sx,sy, r*0.35,g*0.35,b*0.35, 0.0003, 40);
@@ -600,15 +631,15 @@ const Fluid = {
     this.trace('emit');
     // ---- flick -> lightning: tendrils grow cell by cell through the smoke and ride with it
     let seedR = 0;
-    if (m.flick && WATER) { m.flick = false; this.strikes = (this.strikes||0)+1;
+    if (m.flick && (WATER||LIQUID)) { m.flick = false; this.strikes = (this.strikes||0)+1;
       let u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
       gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,450*m.flickStrength,0,0); gl.uniform1f(u.radius,0.012); gl.uniform1f(u.radial,1); this.draw(); this.vel.swap();
       const [wr,wg,wb] = dial(6, 0.2), aa = 0.5*m.flickStrength; this.splat(cx,cy, wr*aa,wg*aa,wb*aa, 0.006, 0); }
-    if (m.flick) { m.flick = false; this.strikeT = now; this.strikeStr = m.flickStrength; this.strikes = (this.strikes||0)+1;
+    if (m.flick && !LIQUID) { m.flick = false; this.strikeT = now; this.strikeStr = m.flickStrength; this.strikes = (this.strikes||0)+1;
       seedR = 0.012 + 0.010*m.flickStrength;
       let u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
       gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,250*m.flickStrength,0,0); gl.uniform1f(u.radius,0.004); gl.uniform1f(u.radial,1); this.draw(); this.vel.swap(); }
-    if (WATER) {                                                          // froth field rides the flow
+    if (WATER||LIQUID) {                                                  // froth field rides the flow
       const u=this.use('froth',this.chg.w); gl.uniform2f(u.velTexel,this.vel.tx,this.vel.ty); gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty);
       gl.uniform1i(u.uFroth,this.chg.r.bind(0)); gl.uniform1i(u.uVelocity,this.vel.r.bind(1)); gl.uniform1i(u.uDye,this.dye.r.bind(2)); gl.uniform1i(u.uDiv,this.div.bind(3));
       gl.uniform1f(u.dt,dt); gl.uniform1f(u.decay,Math.exp(-dt*4.0)); gl.uniform1f(u.gen,1.0); gl.uniform1f(u.time,now/1000); this.draw(); this.chg.swap();
@@ -655,7 +686,7 @@ const Fluid = {
     if (!debugEl.hidden) { this.measure(); this.measureCharge(); }
     // ---- show
     u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1i(u.uCharge,this.chg.r.bind(1)); gl.uniform1f(u.bright,1.0);
-    gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform1f(u.bolt, 0.6 + 0.8*(this.strikeStr||0)); gl.uniform1f(u.water, WATER?1:0);
+    gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform1f(u.bolt, 0.6 + 0.8*(this.strikeStr||0)); gl.uniform1f(u.water, WATER?1:0); gl.uniform1f(u.liquid, LIQUID?1:0);
     gl.uniform1f(u.time, now/1000); gl.uniform1f(u.aspect, this.aspect);
     gl.uniform2f(u.orbPos, cx - m.ax*0.03, cy - m.ay*0.03);                         // a hair of lag so it feels held, not painted on
     gl.uniform1f(u.orbSize, 0.040 + 0.020*a.bass + 0.012*a.level);
@@ -750,7 +781,7 @@ const hsl = (h,s,l,a=1) => `hsla(${h},${s}%,${l}%,${a})`;
 const rings = [], sparks = [];
 const Scenes = [
   { name:'Smoke', gl:true },
-  { name:'Water', gl:true, water:true },
+  { name:'Liquid', gl:true, liquid:true },
   { name:'Feel', draw(ctx, W, H, dt) {
       const a = Signal.audio, m = Signal.motion;
       // fast fade so pulses are snappy; faster at higher tempo
@@ -866,7 +897,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  charge ${Fluid.meanCharge==null?'-':Fluid.meanCharge.toFixed(4)}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v1.00  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v1.10  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `culprit ${Fluid.traceWho||'-'}  jump ${(Fluid.traceMax||0).toFixed(0)}\n` +
     `intensity ${(Fluid.intensity||0).toFixed(2)}  meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
