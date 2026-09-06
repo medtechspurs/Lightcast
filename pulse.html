@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.73</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.74</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -466,8 +466,8 @@ const Fluid = {
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
     const ph = [0, 0.5, 1][Signal.user.physics];
-    gl.uniform2f(u.force, -m.ax*1500*ph, -m.ay*1500*ph); gl.uniform2f(u.buoy, 0, 0);   // rise force disabled while we pin down the drift
-    gl.uniform1f(u.stir, -m.rz*1500*ph); gl.uniform1f(u.aspect, this.aspect); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
+    gl.uniform2f(u.force, -m.ax*1875*ph, -m.ay*1875*ph); gl.uniform2f(u.buoy, 0, 0);   // rise force disabled while we pin down the drift
+    gl.uniform1f(u.stir, -m.rz*1875*ph); gl.uniform1f(u.aspect, this.aspect); gl.uniform1f(u.dt,dt); this.draw(); this.vel.swap();
     // ---- solve
     u=this.use('curl',this.crl); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); this.draw();
     u=this.use('vort',this.vel.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uCurl,this.crl.bind(1));
@@ -651,7 +651,7 @@ function frame(now) {
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
     `acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.73  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `v0.74  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
