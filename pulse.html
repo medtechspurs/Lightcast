@@ -45,11 +45,10 @@
 <body>
 <canvas id="c"></canvas>
 <canvas id="f" hidden></canvas>
-<canvas id="z" style="pointer-events:none"></canvas>
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.82</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.83</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -349,9 +348,32 @@ const Fluid = {
       grad: H+`uniform sampler2D uPressure,uVelocity; void main(){ float L=texture2D(uPressure,vL).x,R=texture2D(uPressure,vR).x,T=texture2D(uPressure,vT).x,B=texture2D(uPressure,vB).x;
         vec2 v=texture2D(uVelocity,vUv).xy; v-=vec2(R-L,T-B); gl_FragColor=vec4(v,0.,1.); }`,
       clear: H+`uniform sampler2D uTexture; uniform float value; void main(){ gl_FragColor=value*texture2D(uTexture,vUv); }`,
-      show: H+`uniform sampler2D uTexture; uniform float bright,time,orbSize,orbGlow,aspect; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
+      charge: H+`uniform sampler2D uCharge,uDye,uVelocity; uniform vec2 texelSize,velTexel; uniform float dt,decay,spread,reach;
+        float dens(vec2 p){ vec3 c=texture2D(uDye,p).rgb; return max(c.r,max(c.g,c.b)); }
+        void main(){
+          vec2 adv=vUv-dt*texture2D(uVelocity,vUv).xy*velTexel;          // charge rides the smoke
+          float q=texture2D(uCharge,adv).x*decay;
+          float cond=smoothstep(.012,.12,dens(vUv));                       // conducts only through smoke
+          vec2 o=texelSize*reach; float n=0.;
+          n=max(n,texture2D(uCharge,vUv+vec2(o.x,0.)).x); n=max(n,texture2D(uCharge,vUv-vec2(o.x,0.)).x);
+          n=max(n,texture2D(uCharge,vUv+vec2(0.,o.y)).x); n=max(n,texture2D(uCharge,vUv-vec2(0.,o.y)).x);
+          n=max(n,texture2D(uCharge,vUv+o).x); n=max(n,texture2D(uCharge,vUv-o).x);
+          n=max(n,texture2D(uCharge,vUv+vec2(o.x,-o.y)).x); n=max(n,texture2D(uCharge,vUv-vec2(o.x,-o.y)).x);
+          q=max(q,n*cond*spread);
+          gl_FragColor=vec4(q,0.,0.,1.); }`,
+      show: H+`uniform sampler2D uTexture,uCharge; uniform float bright,time,orbSize,orbGlow,aspect,bolt; uniform vec2 orbPos; uniform vec3 orbA,orbB,orbC;
+        float dens(vec2 p){ vec3 c=texture2D(uTexture,p).rgb; return max(c.r,max(c.g,c.b)); }
         void main(){ vec3 c=texture2D(uTexture,vUv).rgb; vec2 q=vUv-.5; float vg=1.-smoothstep(.34,.66,length(q));
-        c=max(c,0.); float mx=max(c.r,max(c.g,c.b)); float k=mx/(1.+mx*.6); c*=k/max(mx,1e-4);
+        // --- lightning: charge lights the veins of the smoke
+        float ch=texture2D(uCharge,vUv).x;
+        if(ch>0.003){
+          float d=max(c.r,max(c.g,c.b)); float dn=(dens(vL)+dens(vR)+dens(vT)+dens(vB))*.25;
+          float ridge=clamp((d-dn)*16.+.15,0.,1.);
+          float fl=.7+.3*sin(time*90.+vUv.y*40.)*sin(time*73.+vUv.x*35.);
+          float b=pow(ch,1.6)*(.08+1.4*ridge*ridge)*fl*bolt;
+          vec3 bc=mix(c/max(d,1e-3),vec3(1.),.45);
+          c+=bc*b*3.; }
+        c=max(c,0.); float mx=max(c.r,max(c.g,c.b)); float k=mx/(1.+mx*.45); c*=k/max(mx,1e-4);
         c=pow(c*bright*vg,vec3(1./1.15));
         // --- the orb: a small churning sphere of light at the source
         vec2 o=vUv-orbPos; o.x*=aspect; float d=length(o)/orbSize; float ang=atan(o.y,o.x);
@@ -397,9 +419,9 @@ const Fluid = {
     const ar = innerWidth/innerHeight, simS=96, dyeS=320;
     const sw = ar<1? simS : Math.round(simS*ar), sh = ar<1? Math.round(simS/ar) : simS;
     const dw = ar<1? dyeS : Math.round(dyeS*ar), dh = ar<1? Math.round(dyeS/ar) : dyeS;
-    this.vel=this.dbl(sw,sh); this.dye=this.dbl(dw,dh); this.prs=this.dbl(sw,sh); this.div=this.fbo(sw,sh); this.crl=this.fbo(sw,sh);
+    this.vel=this.dbl(sw,sh); this.dye=this.dbl(dw,dh); this.chg=this.dbl(dw,dh); this.prs=this.dbl(sw,sh); this.div=this.fbo(sw,sh); this.crl=this.fbo(sw,sh);
     this.aspect = ar;
-    return !!(this.vel&&this.dye&&this.prs&&this.div&&this.crl);
+    return !!(this.vel&&this.dye&&this.chg&&this.prs&&this.div&&this.crl);
   },
   use(k, target) { const gl=this.gl, P=this.prog[k]; gl.useProgram(P.p);
     if (target) { gl.bindFramebuffer(gl.FRAMEBUFFER,target.f); gl.viewport(0,0,target.w,target.h); }
@@ -480,9 +502,21 @@ const Fluid = {
       const [sx,sy,ex,ey] = at(11, 0.05 + 0.08*Math.random());
       this.splat(sx,sy, r*0.35,g*0.35,b*0.35, 0.0003, 40);
     }
-    // ---- flick -> lightning jolt through the last puff(s)
-    if (m.flick) { m.flick = false; Lightning.strike(cx, cy, m.flickStrength, this); }
-    if (this.jolts && this.jolts.length) { for (const j of this.jolts) { this.splat(j[0],j[1], j[2],j[3],j[4], 0.0004, 0); this.push(j[0],j[1], j[5],j[6], 0.0006); } this.jolts = []; }
+    // ---- flick -> lightning: seed charge at the orb; it spreads through the smoke and rides with it
+    if (m.flick) { m.flick = false; this.strikeT = now; this.strikeStr = m.flickStrength; this.strikes = (this.strikes||0)+1;
+      let u=this.use('splat',this.chg.w); gl.uniform1i(u.uTarget,this.chg.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
+      gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,1.5,0,0); gl.uniform1f(u.radius,0.0006+0.001*m.flickStrength); gl.uniform1f(u.radial,0); this.draw(); this.chg.swap();
+      u=this.use('splat',this.vel.w); gl.uniform1i(u.uTarget,this.vel.r.bind(0)); gl.uniform1f(u.aspect,this.aspect);
+      gl.uniform2f(u.point,cx,cy); gl.uniform3f(u.color,250*m.flickStrength,0,0); gl.uniform1f(u.radius,0.004); gl.uniform1f(u.radial,1); this.draw(); this.vel.swap(); }
+    {
+      const age = this.strikeT ? (now - this.strikeT) : 1e9, growing = age < 240 + 120*(this.strikeStr||0);
+      const steps = growing ? 4 : 1;
+      for (let i=0;i<steps;i++) {
+        const u=this.use('charge',this.chg.w); gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform2f(u.velTexel,this.vel.tx,this.vel.ty);
+        gl.uniform1i(u.uCharge,this.chg.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1)); gl.uniform1i(u.uVelocity,this.vel.r.bind(2));
+        gl.uniform1f(u.dt, i===0 ? dt : 0); gl.uniform1f(u.decay, growing ? Math.exp(-dt*2.5/steps) : Math.exp(-dt*11));
+        gl.uniform1f(u.spread, growing ? 0.992 : 0); gl.uniform1f(u.reach, 2.0 + Math.random()*1.5); this.draw(); this.chg.swap(); }
+    }
     // ---- motion -> wind & buoyancy. Gas lags the phone (force opposite acceleration) and rises against gravity.
     let u=this.use('force',this.vel.w); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uDye,this.dye.r.bind(1));
     const ph = [0, 0.5, 1][Signal.user.physics];
@@ -502,7 +536,8 @@ const Fluid = {
     gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.13 + bpm/1200); gl.uniform1f(u.cap,1.6); this.draw(); this.dye.swap();
     if (!debugEl.hidden) this.measure();
     // ---- show
-    u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1f(u.bright,1.0);
+    u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1i(u.uCharge,this.chg.r.bind(1)); gl.uniform1f(u.bright,1.0);
+    gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform1f(u.bolt, 0.6 + 0.8*(this.strikeStr||0));
     gl.uniform1f(u.time, now/1000); gl.uniform1f(u.aspect, this.aspect);
     gl.uniform2f(u.orbPos, cx - m.ax*0.03, cy - m.ay*0.03);                         // a hair of lag so it feels held, not painted on
     gl.uniform1f(u.orbSize, 0.040 + 0.020*a.bass + 0.012*a.level);
@@ -514,110 +549,6 @@ const Fluid = {
 };
 Fluid.remember = function(x, y, band) { this.puffs.push([x, y, band, performance.now()]); if (this.puffs.length > 6) this.puffs.shift(); };
 
-/* ---------------- Lightning (flick) ---------------- */
-// A discharge that grows through the smoke: reads a low-res snapshot of the dye field, then
-// extends tips frame by frame along the densest/most outward paths, branching more as it goes.
-const Lightning = {
-  strikes:[], cv:document.getElementById('z'), ctx:null,
-  strike(cx, cy, strength, fluid) {
-    const grid = fluid.readDye();
-    this.strikes.push({ born:performance.now(), str:strength, grid, cx, cy, aspect:fluid.aspect,
-      segs:[], tips:[{x:cx, y:cy, dir:Math.random()*Math.PI*2, gen:0}], frames:0, done:false });
-    // seed: several tips around the orb
-    const st = this.strikes[this.strikes.length-1];
-    const n = 3 + Math.round(4*strength);
-    st.tips = []; for (let i=0;i<n;i++) st.tips.push({ x:cx, y:cy, dir:(i/n)*Math.PI*2 + Math.random()*0.5, gen:0 });
-  },
-  sample(g, x, y) {                       // dye color+density at uv (x,y); returns [r,g,b,density]
-    if (!g) return [0.6,0.6,0.9,0.3];
-    const gx = Math.min(g.w-1, Math.max(0, Math.floor(x*g.w))), gy = Math.min(g.h-1, Math.max(0, Math.floor(y*g.h)));
-    const i = (gy*g.w + gx)*4, r=g.data[i]||0, gg=g.data[i+1]||0, b=g.data[i+2]||0;
-    return [r,gg,b, Math.max(r,gg,b)];
-  },
-  grow(st, fluid) {
-    if (st.done) return;
-    st.frames++;
-    const GROW_FRAMES = 14, stepLen = 0.018, asp = st.aspect;
-    const newTips = [];
-    for (const t of st.tips) {
-      for (let k=0;k<2;k++) {                                     // two steps per frame: fast
-        const rx = t.x - st.cx, ry = t.y - st.cy, dist = Math.hypot(rx*1/asp, ry) + 1e-4;
-        const outward = Math.atan2(ry, rx/asp);
-        let best = null;
-        for (const da of [-0.9,-0.5,-0.2,0,0.2,0.5,0.9]) {
-          const dir = t.dir + da;
-          const nx = t.x + Math.cos(dir)*stepLen/asp, ny = t.y + Math.sin(dir)*stepLen;
-          if (nx < 0.02 || nx > 0.98 || ny < 0.02 || ny > 0.98) continue;
-          const d = this.sample(st.grid, nx, ny)[3];
-          const out = Math.cos(dir - outward);
-          const score = d*1.4 + out*0.7 - Math.abs(da)*0.15 + Math.random()*0.5;
-          if (!best || score > best.score) best = { score, dir, nx, ny, d };
-        }
-        if (!best) { t.dead = true; break; }
-        const c = this.sample(st.grid, (t.x+best.nx)/2, (t.y+best.ny)/2);
-        const w = 0.8 + (2.6*dist/0.6) * (0.6 + 0.6*st.str);       // thicker further out
-        st.segs.push({ x0:t.x, y0:t.y, x1:best.nx, y1:best.ny, w, col:c, born:st.frames });
-        if (st.segs.length % 5 === 0) fluid.jolts.push([best.nx, best.ny, 0.7*st.str, 0.75*st.str, 0.85*st.str, Math.cos(best.dir)*380*st.str, Math.sin(best.dir)*380*st.str]);
-        t.x = best.nx; t.y = best.ny; t.dir = best.dir; t.gen++;
-        if (best.d < 0.03 && Math.random() < 0.35) { t.dead = true; break; }   // thin air: usually stops
-        const pBranch = 0.05 + 0.22*Math.min(1,best.d) + 0.05*Math.min(4, t.gen/4) + 0.1*st.str;
-        if (Math.random() < pBranch && st.tips.length + newTips.length < 48)
-          newTips.push({ x:t.x, y:t.y, dir:t.dir + (Math.random()<0.5?1:-1)*(0.45+Math.random()*0.7), gen:t.gen });
-      }
-    }
-    st.tips = st.tips.filter(t => !t.dead).concat(newTips);
-    if (st.frames >= GROW_FRAMES || !st.tips.length || st.segs.length > 700) st.done = true;
-  },
-  draw(W, H, now, fluid) {
-    if (!this.ctx) this.ctx = this.cv.getContext('2d');
-    const ctx = this.ctx, dpr = Math.min(2, devicePixelRatio||1);
-    if (this.cv.width !== Math.round(W*dpr)) { this.cv.width = Math.round(W*dpr); this.cv.height = Math.round(H*dpr); }
-    ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
-    if (!this.strikes.length) return;
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.globalCompositeOperation = 'lighter';
-    const DUR = 500, HOLD = 260;
-    for (let i=this.strikes.length-1;i>=0;i--) {
-      const st = this.strikes[i], age = now - st.born;
-      if (age > DUR) { this.strikes.splice(i,1); continue; }
-      this.grow(st, fluid);
-      const fade = age < HOLD ? 1 : 1 - (age-HOLD)/(DUR-HOLD);
-      const flick = 0.75 + 0.25*Math.random();
-      for (const sg of st.segs) {
-        const fresh = Math.max(0, 1 - (st.frames - sg.born)/6);       // newest segments flash brightest
-        const a = fade * flick * (0.55 + 0.45*fresh);
-        const [r,g,b,d] = sg.col, mx = Math.max(r,g,b,1e-3);
-        const cr = Math.round(255*(0.45 + 0.55*r/mx)), cg = Math.round(255*(0.45 + 0.55*g/mx)), cb = Math.round(255*(0.45 + 0.55*b/mx));
-        const X0 = sg.x0*W, Y0 = (1-sg.y0)*H, X1 = sg.x1*W, Y1 = (1-sg.y1)*H;
-        ctx.strokeStyle = `rgba(${cr},${cg},${cb},${a*0.45})`; ctx.lineWidth = sg.w*3.2;
-        ctx.beginPath(); ctx.moveTo(X0,Y0); ctx.lineTo(X1,Y1); ctx.stroke();
-        ctx.strokeStyle = `rgba(255,255,255,${a*0.9})`; ctx.lineWidth = sg.w;
-        ctx.beginPath(); ctx.moveTo(X0,Y0); ctx.lineTo(X1,Y1); ctx.stroke();
-      }
-    }
-    ctx.globalCompositeOperation = 'source-over';
-  }
-};
-Fluid.readDye = function() {                                    // low-res snapshot of the dye field (color + density)
-  const gl=this.gl, t=this.dye.r.t;
-  try {
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    const L = 3, w = Math.max(1, this.dye.r.w >> L), h = Math.max(1, this.dye.r.h >> L);
-    if (!this.rfb) this.rfb = gl.createFramebuffer();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.rfb);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, L);
-    const type = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE);
-    let data;
-    if (type === gl.FLOAT) { data = new Float32Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.FLOAT,data); }
-    else { const px = new Uint16Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.HALF_FLOAT,px);
-      const h2f = v => { const s=(v>>15)&1, e=(v>>10)&31, m=v&1023; if(e===0) return (s?-1:1)*Math.pow(2,-14)*(m/1024); if(e===31) return 0; return (s?-1:1)*Math.pow(2,e-15)*(1+m/1024); };
-      data = new Float32Array(w*h*4); for (let i=0;i<px.length;i++) data[i] = h2f(px[i]); }
-    gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    return { w, h, data };
-  } catch (e) { this.readErr = String(e).slice(0,40); return null; }
-};
-Fluid.jolts = [];
 
 Fluid.measure = function() {
   const gl=this.gl, t=this.vel.r.t;
@@ -766,7 +697,7 @@ function frame(now) {
   fps += (1/dt - fps)*0.05; drift += dt;
   Audio.update(now); Gesture.update(now);
   const sc = Scenes[Signal.user.scene];
-  if (sc.gl && Fluid.ok) { if (canvas.style.display!=='none') { canvas.style.display='none'; Fluid.cv.hidden=false; } Fluid.step(dt, now); Lightning.draw(W, H, performance.now(), Fluid); }
+  if (sc.gl && Fluid.ok) { if (canvas.style.display!=='none') { canvas.style.display='none'; Fluid.cv.hidden=false; } Fluid.step(dt, now); }
   else { if (canvas.style.display==='none') { canvas.style.display=''; Fluid.cv.hidden=true; }
     if (sc.gl) { ctx.fillStyle='#000'; ctx.fillRect(0,0,W,H); } else sc.draw(ctx, W, H, dt);
     if (vignette) { ctx.fillStyle = vignette; ctx.fillRect(0,0,W,H); } }
@@ -777,8 +708,8 @@ function frame(now) {
     `bands ${Array.from(Signal.audio.bands).map(v=>Math.round(v*9)).join('')}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
-    `flicks ${Signal.motion.flicks}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.82  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
+    `v0.83  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
