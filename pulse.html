@@ -48,7 +48,7 @@
 
 <div id="start">
   <h1>Pulse</h1>
-  <p class="fine" style="margin:0 0 20px">Version 0.83</p>
+  <p class="fine" style="margin:0 0 20px">Version 0.84</p>
   <p>Your phone listens to the music in the room and turns it into light. Tilt and move it to shape the light.</p>
   <button class="big" id="go">Start</button>
   <p class="fine">Uses the microphone and motion sensors on this phone only. Nothing is recorded or sent anywhere.</p>
@@ -60,7 +60,7 @@
   <div class="row"><span>Look</span><div class="seg" id="scenes"></div></div>
   <div class="row"><span>Color</span><div class="seg" id="palettes"></div></div>
   <div class="row"><span>Physics</span><div class="seg" id="physics"></div></div>
-  <div class="row"><span>Test</span><div class="seg"><button id="tHits">Hits on</button><button id="tSparks">Sparks on</button><button id="tSwirl">Swirl on</button></div></div>
+  <div class="row"><span>Test</span><div class="seg"><button id="tHits">Hits on</button><button id="tSparks">Sparks on</button><button id="tSwirl">Swirl on</button><button id="tStrike">Strike</button></div></div>
   <div class="row"><span>Bright</span><input type="range" id="bright" min="0.15" max="1" step="0.01" value="0.8"></div>
   <div class="row"><span>Feel</span><input type="range" id="sens" min="0.5" max="2" step="0.05" value="1"></div>
   <div class="row"><span></span><div class="seg"><button id="dbg">Show levels</button></div></div>
@@ -370,7 +370,7 @@ const Fluid = {
           float d=max(c.r,max(c.g,c.b)); float dn=(dens(vL)+dens(vR)+dens(vT)+dens(vB))*.25;
           float ridge=clamp((d-dn)*16.+.15,0.,1.);
           float fl=.7+.3*sin(time*90.+vUv.y*40.)*sin(time*73.+vUv.x*35.);
-          float b=pow(ch,1.6)*(.08+1.4*ridge*ridge)*fl*bolt;
+          float b=pow(ch,1.4)*(.35+1.6*ridge*ridge)*fl*bolt;
           vec3 bc=mix(c/max(d,1e-3),vec3(1.),.45);
           c+=bc*b*3.; }
         c=max(c,0.); float mx=max(c.r,max(c.g,c.b)); float k=mx/(1.+mx*.45); c*=k/max(mx,1e-4);
@@ -534,7 +534,7 @@ const Fluid = {
     gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation,0.35); gl.uniform1f(u.cap,0); this.draw(); this.vel.swap();
     u=this.use('advect',this.dye.w); gl.uniform2f(u.texelSize,this.vel.tx,this.vel.ty); gl.uniform1i(u.uVelocity,this.vel.r.bind(0)); gl.uniform1i(u.uSource,this.dye.r.bind(1));
     gl.uniform1f(u.dt,dt); gl.uniform1f(u.dissipation, 0.13 + bpm/1200); gl.uniform1f(u.cap,1.6); this.draw(); this.dye.swap();
-    if (!debugEl.hidden) this.measure();
+    if (!debugEl.hidden) { this.measure(); this.measureCharge(); }
     // ---- show
     u=this.use('show',null); gl.uniform1i(u.uTexture,this.dye.r.bind(0)); gl.uniform1i(u.uCharge,this.chg.r.bind(1)); gl.uniform1f(u.bright,1.0);
     gl.uniform2f(u.texelSize,this.dye.tx,this.dye.ty); gl.uniform1f(u.bolt, 0.6 + 0.8*(this.strikeStr||0));
@@ -550,6 +550,20 @@ const Fluid = {
 Fluid.remember = function(x, y, band) { this.puffs.push([x, y, band, performance.now()]); if (this.puffs.length > 6) this.puffs.shift(); };
 
 
+Fluid.measureCharge = function() {
+  const gl=this.gl, t=this.chg.r.t;
+  try {
+    gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); gl.generateMipmap(gl.TEXTURE_2D);
+    const levels = Math.floor(Math.log2(Math.max(this.chg.r.w, this.chg.r.h)));
+    if (!this.cfb) this.cfb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.cfb); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, levels);
+    const type = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE); let v;
+    if (type === gl.FLOAT) { const px=new Float32Array(4); gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,px); v=px[0]; }
+    else { const px=new Uint16Array(4); gl.readPixels(0,0,1,1,gl.RGBA,gl.HALF_FLOAT,px); const h=px[0], sg=(h>>15)&1, e=(h>>10)&31, m=h&1023; v = e===0 ? (sg?-1:1)*Math.pow(2,-14)*(m/1024) : (sg?-1:1)*Math.pow(2,e-15)*(1+m/1024); }
+    gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    this.meanCharge = v;
+  } catch (e) { this.meanCharge = -1; }
+};
 Fluid.measure = function() {
   const gl=this.gl, t=this.vel.r.t;
   try {
@@ -708,8 +722,8 @@ function frame(now) {
     `bands ${Array.from(Signal.audio.bands).map(v=>Math.round(v*9)).join('')}\n` +
     `energy ${Signal.motion.energy.toFixed(2)}  shake ${Signal.motion.shake?'Y':'-'}\n` +
     `tilt ${Signal.motion.tiltX.toFixed(2)},${Signal.motion.tiltY.toFixed(2)}  motion ${Signal.motion.available?'ok':'none'}${IOS?' ios':''}\n` +
-    `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
-    `v0.83  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
+    `flicks ${Signal.motion.flicks}  strikes ${Fluid.strikes||0}  charge ${Fluid.meanCharge==null?'-':Fluid.meanCharge.toFixed(4)}  acc ${Signal.motion.ax.toFixed(2)},${Signal.motion.ay.toFixed(2)}  grav ${Signal.motion.gx.toFixed(2)},${Signal.motion.gy.toFixed(2)}  twist ${Signal.motion.rz.toFixed(2)}  ev ${Signal.motion.events}\n` +
+    `v0.84  fps ${fps.toFixed(0)}  sr ${Audio.ctx?Audio.ctx.sampleRate:0}\n` +
     `meanV ${Fluid.meanV ? Fluid.meanV.map(v=>v.toFixed(1)).join(',') : (Fluid.measureErr||'n/a')}  peak ${Fluid.peakV ? Fluid.peakV.map(v=>v.toFixed(0)).join(',') : '-'}  nan ${Fluid.nanCount||0}\n` +
     `key ${['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'][Signal.audio.key]}  bright ${Signal.audio.centroid.toFixed(2)}  hitLoud ${Signal.audio.hitLoud.toFixed(2)}  noteLoud ${Signal.audio.noteLoud.toFixed(2)}\n` +
     `bassDb ${(Audio.lastBassDb||0).toFixed(0)}  floor ${Audio.floorDb.toFixed(0)}  ceil ${Audio.ceilDb.toFixed(0)}\n` +
@@ -748,6 +762,7 @@ document.getElementById('bright').oninput = e => { Signal.user.bright = +e.targe
 document.getElementById('sens').oninput = e => Signal.user.sens = +e.target.value;
 [['tHits','noHits','Hits'],['tSparks','noSparks','Sparks'],['tSwirl','noSwirl','Swirl']].forEach(([id,key,lab]) => {
   document.getElementById(id).onclick = e => { Signal.user[key] = !Signal.user[key]; e.target.textContent = lab + (Signal.user[key] ? ' OFF' : ' on'); e.target.classList.toggle('on', Signal.user[key]); }; });
+document.getElementById('tStrike').onclick = () => { Signal.motion.flick = true; Signal.motion.flickStrength = 1; };
 document.getElementById('dbg').onclick = e => { debugEl.hidden = !debugEl.hidden; e.target.textContent = debugEl.hidden ? 'Show levels' : 'Hide levels'; };
 
 document.getElementById('go').onclick = async () => {
